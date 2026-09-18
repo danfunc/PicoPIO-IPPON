@@ -62,7 +62,58 @@ check_bit:
 
     ; --- 全パケット送出完了 (EOP) ---
     set pins, 1             ; 13: 最終ビット完了: 即座にHigh能動出力
-    irq set 0 rel               ; 14: パケット物理送出の完全終了をCPU/DMAへ通知 (rel: RP2350データシート 3.4.7.3、SM番号+0を8で剰余しIRQフラグを自動分離)
+    irq set 0 rel           ; 14: パケット物理送出の完全終了をCPU/DMAへ通知 (rel: RP2350データシート 3.4.7.3、SM番号+0を8で剰余しIRQフラグを自動分離)
+.wrap
+
+
+.program bmc_mid12_tx_isr
+; --- TX: ISR極性保持・12cycワードカウント式パケット送信器 (17命令) ---
+; 自ピン読み戻し (mov pins, !pins) を廃止し、ISRに出力極性を保持することで
+; パッド入力バッファおよび入力同期器遅延 (2cyc) を完全排除する。
+; 先頭ワードとして (送信総データワード数 - 1) を与える。
+;
+; [ワード境界におけるセル幅の拡大 (12 -> 14 サイクル)]
+; - 通常ビット (0..30ビット目):
+;     mov pins, !isr (1cyc) + mov isr, !isr (1cyc) + out x, 1 (1cyc) + jmp !x, is_zero [2] (3cyc) +
+;     (1: mov pins, !isr (1cyc) + mov isr, !isr [2] (3cyc) + jmp check_bit (1cyc) / 0: nop [4] (5cyc)) +
+;     jmp !osre, bit_loop (1cyc) = 計12cyc
+; - ワード最終ビット (31ビット目):
+;     jmp !osre が不成立でフォールスルー (1cyc)
+;     jmp y--, word_loop (1cyc)
+;     pull block (1cyc)
+;     計14サイクル (12 -> 14サイクルへ拡大)。RX側の wait 命令により安全に吸収される。
+.wrap_target
+idle:
+    set pins, 1             ; 1: 待機時は確実にHigh (3.3V) を能動出力
+    mov isr, !null          ; 2: ISRを出力極性High (全1: 0xFFFFFFFF) で初期化
+    pull block              ; 3: パケットヘッダ長ワード取得 (Y = 総データワード数 - 1)
+    mov y, osr              ; 4: レジスタYへワードカウンタを格納
+
+word_loop:
+    pull block              ; 5: 送信データワード取得 (32bit)
+
+bit_loop:
+    mov pins, !isr          ; 6: 境界エッジ反転 (ISR極性反転出力) [Cycle 0]
+    mov isr, !isr           ; 7: ISR極性を新レベルへ更新 [Cycle 1]
+    out x, 1                ; 8: OSRから1ビット取得 [Cycle 2]
+    jmp !x, is_zero     [2] ; 9: 0なら前半中央反転スキップ (ディレイ2 -> 前半計6cyc, Cycle 3..5)
+
+    ; --- ビット1: 中央反転 (6cyc境界で厳密反転) ---
+    mov pins, !isr          ; 10: 中央エッジ反転 (ISR極性反転出力) [Cycle 6]
+    mov isr, !isr       [2] ; 11: ISR極性を新レベルへ更新 (ディレイ2 -> Cycle 7..9)
+    jmp check_bit           ; 12: 次ビット判定へジャンプ [Cycle 10]
+
+is_zero:
+    ; --- ビット0: レベル維持 ---
+    nop                 [4] ; 13: 前半レベル維持 (ディレイ4 -> Cycle 6..10の5cyc消費)
+
+check_bit:
+    jmp !osre, bit_loop     ; 14: OSRに残りがあれば次ビットへ [Cycle 11] (通常計12cyc, 最終ビットは14cyc)
+    jmp y--, word_loop      ; 15: パケット内に次ワードがあれば取得へ [Cycle 12]
+
+    ; --- 全パケット送出完了 (EOP) ---
+    set pins, 1             ; 16: 最終ビット完了: 即座にHigh能動出力 [Cycle 13]
+    irq set 0 rel           ; 17: パケット物理送出の完全終了をCPU/DMAへ通知 (rel: RP2350データシート 3.4.7.3、SM番号+0を8で剰余しIRQフラグを自動分離)
 .wrap
 
 
@@ -144,6 +195,31 @@ static inline void bmc_mid12_tx_program_init(PIO pio, uint sm, uint offset, uint
     pio_sm_set_pins_with_mask(pio, sm, 1u << pin, 1u << pin);
     pio_sm_set_pindirs_with_mask(pio, sm, 1u << pin, 1u << pin);
     gpio_set_function(pin, (gpio_function_t)pio_get_funcsel(pio)); // pio0/1/2 いずれにも正しく対応 (pico-sdk hardware/pio.h)
+}
+
+static inline void bmc_mid12_tx_isr_program_init(PIO pio, uint sm, uint offset, uint pin, float clkdiv) {
+    // 1. SIOでHigh出力を保持 (自ピン読み戻しを行わないためinput_enabledは不要/明示的falseで入力同期器を切断)
+    gpio_put(pin, 1);
+    gpio_set_dir(pin, GPIO_OUT);
+    gpio_set_function(pin, GPIO_FUNC_SIO);
+    gpio_set_slew_rate(pin, GPIO_SLEW_RATE_SLOW);
+    gpio_set_drive_strength(pin, GPIO_DRIVE_STRENGTH_4MA);
+    gpio_set_input_enabled(pin, false);
+
+    // 2. SM設定 (自ピン読み戻しを行わないためsm_config_set_in_pinsは不要)
+    pio_sm_config c = bmc_mid12_tx_isr_program_get_default_config(offset);
+    sm_config_set_set_pins(&c, pin, 1);
+    sm_config_set_out_pins(&c, pin, 1);
+    sm_config_set_out_shift(&c, false, false, 32);
+    sm_config_set_clkdiv(&c, clkdiv);
+
+    pio_sm_init(pio, sm, offset, &c);
+
+    // 3. ラッチHigh / 方向OUT準備してからPIOへ切替 & ISRを全1 (High極性) に初期化
+    pio_sm_set_pins_with_mask(pio, sm, 1u << pin, 1u << pin);
+    pio_sm_set_pindirs_with_mask(pio, sm, 1u << pin, 1u << pin);
+    pio_sm_exec(pio, sm, pio_encode_mov_not(pio_isr, pio_null));
+    gpio_set_function(pin, (gpio_function_t)pio_get_funcsel(pio));
 }
 
 static inline void bmc_mid12_rx_program_init(PIO pio, uint sm, uint offset, uint pin, float clkdiv) {

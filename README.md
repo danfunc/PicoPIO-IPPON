@@ -8,6 +8,8 @@ A proof of concept of a **single-wire (plus GND) point-to-point link** that send
 
 "IPPON" (一本) is Japanese for "one line".
 
+The unified benchmark's 18.75 Mbps mode uses the 16-cycle BMC programs at a 300 MHz system clock (PIO clkdiv 1). Other BMC mode dividers are adjusted to preserve their listed line rates. The measurements below are earlier 150 MHz results.
+
 > Status: **proof of concept**. All measurements were taken on a single Pico 2 W with GP0 looped back to GP1. Tests between separate boards (with independent clocks) have not been done yet.
 
 ## Measured results (one Pico 2 W, GP0↔GP1 jumper, sysclk 150 MHz)
@@ -25,6 +27,21 @@ Application-level throughput in continuous (burst) mode. Every mode ran with zer
 - Round-trip time in stop-and-wait mode (send one frame, wait for it to be received): 41.3 µs at 18.75 Mbps.
 - **OTA**: sending a 384 KB image in 64 KB windows, writing it to flash and verifying it by read-back takes 1.80 s (18.75 Mbps) to 2.00 s (9.375 Mbps). CRC matched, zero retransmissions. On a single board the sender also stalls while the receiver writes flash, so link time and flash writes do not overlap.
 - **Flash (W25Q32)**: 4 KB erase 32.2 ms, 64 KB erase 88.5 ms, 4 KB program 7.23 ms, 256 B program 0.63 ms (measured on previously written regions).
+
+## 300 MHz transport comparison (Pico 2 W, GP0↔GP1 loopback)
+
+These burst measurements used the same packet payload, CRC, DMA benchmark, and 300 MHz clock. PL011 and PIO UART use 8N1; PIO UART uses the Raspberry Pi example TX/RX programs at 8 PIO cycles per bit, with DMA. BMC 18.75 Mbps uses 16 PIO cycles per bit.
+
+| Transport | Configured line rate | Measured PHY | Payload throughput | Errors |
+|---|---:|---:|---:|---:|
+| PL011 UART | 9.375 Mbps | 9.342 Mbps | 724.0 KiB/s | 0 |
+| Official PIO UART | 9.375 Mbps | 9.362 Mbps | 725.4 KiB/s | 0 |
+| BMC | 9.375 Mbps | 9.302 Mbps | 843.0 KiB/s | 0 |
+| Official PIO UART | 18.75 Mbps | 18.756 Mbps | 1,354.3 KiB/s | 0 |
+| BMC (16 cycles at 300 MHz) | 18.75 Mbps | 18.538 Mbps | 1,671.5 KiB/s | 0 |
+| Official PIO UART (experimental) | 37.5 Mbps | 37.280 Mbps | 2,370.0 KiB/s | 0 |
+
+At the same configured line rate, BMC delivered about 16% more payload than either UART mode at 9.375 Mbps, and about 23% more than PIO UART at 18.75 Mbps. The 37.5 Mbps PIO UART mode delivered about 42% more payload than 18.75 Mbps BMC, at twice the line rate. Each mode ran for about 4 seconds; the 37.5 Mbps mode ran for 6 seconds. This is a single-board loopback result, not an independent-clock test between two boards. UART transports send the post-sync byte frame with 8N1; BMC adds preamble, sync, and postamble, so the table compares delivered application payload under each link's framing.
 
 ## How it works
 

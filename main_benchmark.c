@@ -10,8 +10,10 @@
 #include "common/packet.h"
 #include "common/benchmark_common.h"
 #include "common/build_info.h"
+#include "common/overclock.h"
 #include "bmc/bmc_driver.h"
 #include "uart/uart_driver.h"
+#include "uart/pio_uart_driver.h"
 #include "bmc_p2p.pio.h"
 #include "bmc_p2p_fast.pio.h"
 #include "bmc_p2p_mid12.pio.h"
@@ -21,6 +23,7 @@
 #define PIN_RX 1
 
 #define UART_ID uart0
+#define PIO_UART_BAUD_FLAG 0x80000000u
 
 // -------------------------------------------------------------
 // モード定義
@@ -28,18 +31,21 @@
 typedef enum {
     MODE_UART_3M = 0,    // UART 3.000 Mbps (停止待ち)
     MODE_UART_9M,        // UART 9.375 Mbps (停止待ち)
-    MODE_BMC_3M,         // BMC  3.125 Mbps (16 cyc/bit, clkdiv 3.0f, PoC標準, 停止待ち)
-    MODE_BMC_9M,         // BMC  9.375 Mbps (16 cyc/bit, clkdiv 1.0f, 停止待ち)
-    MODE_BMC_18M,        // BMC 18.750 Mbps ( 8 cyc/bit, clkdiv 1.0f, EXPERIMENTAL, 停止待ち)
+    MODE_BMC_3M,         // BMC  3.125 Mbps (16 cyc/bit, clkdiv 6.0f @ 300MHz, 停止待ち)
+    MODE_BMC_9M,         // BMC  9.375 Mbps (16 cyc/bit, clkdiv 2.0f @ 300MHz, 停止待ち)
+    MODE_BMC_18M,        // BMC 18.750 Mbps (16 cyc/bit @ 300MHz, EXPERIMENTAL, 停止待ち)
     MODE_UART_3M_BURST,  // UART 3.000 Mbps (連続送信, Dual-Core RX)
     MODE_UART_9M_BURST,  // UART 9.375 Mbps (連続送信, Dual-Core RX)
     MODE_BMC_3M_BURST,   // BMC  3.125 Mbps (連続送信, Dual-Core RX)
     MODE_BMC_9M_BURST,   // BMC  9.375 Mbps (連続送信, Dual-Core RX)
-    MODE_BMC_12M,        // BMC 12.500 Mbps (12 cyc/bit, clkdiv 1.0f, 停止待ち)
-    MODE_BMC_12M_BURST,  // BMC 12.500 Mbps (12 cyc/bit, clkdiv 1.0f, Burst 連続送信)
-    MODE_BMC_15M,        // BMC 15.000 Mbps (10 cyc/bit, clkdiv 1.0f, 停止待ち)
-    MODE_BMC_15M_BURST,  // BMC 15.000 Mbps (10 cyc/bit, clkdiv 1.0f, Burst 連続送信)
-    MODE_BMC_18M_BURST,  // BMC 18.750 Mbps ( 8 cyc/bit, clkdiv 1.0f, EXPERIMENTAL, Burst 連続送信) B-3
+    MODE_BMC_12M,        // BMC 12.500 Mbps (12 cyc/bit, clkdiv 2.0f @ 300MHz, 停止待ち)
+    MODE_BMC_12M_BURST,  // BMC 12.500 Mbps (12 cyc/bit, clkdiv 2.0f @ 300MHz, Burst 連続送信)
+    MODE_BMC_15M,        // BMC 15.000 Mbps (10 cyc/bit, clkdiv 2.0f @ 300MHz, 停止待ち)
+    MODE_BMC_15M_BURST,  // BMC 15.000 Mbps (10 cyc/bit, clkdiv 2.0f @ 300MHz, Burst 連続送信)
+    MODE_BMC_18M_BURST,  // BMC 18.750 Mbps (16 cyc/bit @ 300MHz, EXPERIMENTAL, Burst 連続送信)
+    MODE_PIO_UART_9M_BURST,
+    MODE_PIO_UART_18M_BURST,
+    MODE_PIO_UART_37M_BURST,
     MODE_COUNT
 } bench_mode_t;
 
@@ -57,19 +63,26 @@ typedef struct {
 static const mode_desc_t MODE_DESCS[MODE_COUNT] = {
     [MODE_UART_3M]        = {"UART ( 3.000M)",        3.000f, true,  BMC_RATE_STD_16CYC, 0.0f, 3000000, false, false},
     [MODE_UART_9M]        = {"UART ( 9.375M)",        9.375f, true,  BMC_RATE_STD_16CYC, 0.0f, 9375000, false, false},
-    [MODE_BMC_3M]         = {"BMC  ( 3.125M)",        3.125f, false, BMC_RATE_STD_16CYC, 3.0f,       0, false, false},
-    [MODE_BMC_9M]         = {"BMC  ( 9.375M)",        9.375f, false, BMC_RATE_STD_16CYC, 1.0f,       0, false, false},
-    [MODE_BMC_18M]        = {"BMC  (18.750M)",       18.750f, false, BMC_RATE_FAST_8CYC, 1.0f,       0, true,  false},
+    [MODE_BMC_3M]         = {"BMC  ( 3.125M)",        3.125f, false, BMC_RATE_STD_16CYC, 6.0f,       0, false, false},
+    [MODE_BMC_9M]         = {"BMC  ( 9.375M)",        9.375f, false, BMC_RATE_STD_16CYC, 2.0f,       0, false, false},
+    [MODE_BMC_18M]        = {"BMC  (18.750M, OC16)", 18.750f, false, BMC_RATE_OC_16CYC, 1.0f, 0, true, false},
     [MODE_UART_3M_BURST]  = {"UART ( 3.000M Burst)",  3.000f, true,  BMC_RATE_STD_16CYC, 0.0f, 3000000, false, true},
     [MODE_UART_9M_BURST]  = {"UART ( 9.375M Burst)",  9.375f, true,  BMC_RATE_STD_16CYC, 0.0f, 9375000, false, true},
-    [MODE_BMC_3M_BURST]   = {"BMC  ( 3.125M Burst)",  3.125f, false, BMC_RATE_STD_16CYC, 3.0f,       0, false, true},
-    [MODE_BMC_9M_BURST]   = {"BMC  ( 9.375M Burst)",  9.375f, false, BMC_RATE_STD_16CYC, 1.0f,       0, false, true},
-    [MODE_BMC_12M]        = {"BMC  (12.500M)",       12.500f, false, BMC_RATE_MID_12CYC, 1.0f,       0, false, false},
-    [MODE_BMC_12M_BURST]  = {"BMC  (12.500M Burst)", 12.500f, false, BMC_RATE_MID_12CYC, 1.0f,       0, false, true},
-    [MODE_BMC_15M]        = {"BMC  (15.000M)",       15.000f, false, BMC_RATE_MID_10CYC, 1.0f,       0, false, false},
-    [MODE_BMC_15M_BURST]  = {"BMC  (15.000M Burst)", 15.000f, false, BMC_RATE_MID_10CYC, 1.0f,       0, false, true},
-    [MODE_BMC_18M_BURST]  = {"BMC  (18.750M Burst)", 18.750f, false, BMC_RATE_FAST_8CYC, 1.0f,       0, true,  true}
+    [MODE_BMC_3M_BURST]   = {"BMC  ( 3.125M Burst)",  3.125f, false, BMC_RATE_STD_16CYC, 6.0f,       0, false, true},
+    [MODE_BMC_9M_BURST]   = {"BMC  ( 9.375M Burst)",  9.375f, false, BMC_RATE_STD_16CYC, 2.0f,       0, false, true},
+    [MODE_BMC_12M]        = {"BMC  (12.500M)",       12.500f, false, BMC_RATE_MID_12CYC, 2.0f,       0, false, false},
+    [MODE_BMC_12M_BURST]  = {"BMC  (12.500M Burst)", 12.500f, false, BMC_RATE_MID_12CYC, 2.0f,       0, false, true},
+    [MODE_BMC_15M]        = {"BMC  (15.000M)",       15.000f, false, BMC_RATE_MID_10CYC, 2.0f,       0, false, false},
+    [MODE_BMC_15M_BURST]  = {"BMC  (15.000M Burst)", 15.000f, false, BMC_RATE_MID_10CYC, 2.0f,       0, false, true},
+    [MODE_BMC_18M_BURST]  = {"BMC  (18.750M Burst, OC16)", 18.750f, false, BMC_RATE_OC_16CYC, 1.0f, 0, true, true},
+    [MODE_PIO_UART_9M_BURST] = {"PIO UART (9.375M Burst, 8N1)", 9.375f, true, BMC_RATE_STD_16CYC, 0.0f, PIO_UART_BAUD_FLAG | 9375000u, false, true},
+    [MODE_PIO_UART_18M_BURST] = {"PIO UART (18.750M Burst, 8N1)", 18.750f, true, BMC_RATE_STD_16CYC, 0.0f, PIO_UART_BAUD_FLAG | 18750000u, false, true},
+    [MODE_PIO_UART_37M_BURST] = {"PIO UART (37.500M Burst, 8N1)", 37.500f, true, BMC_RATE_STD_16CYC, 0.0f, PIO_UART_BAUD_FLAG | 37500000u, true, true}
 };
+
+static inline bool bmc_is_18m_rate(bmc_rate_family_t family) {
+    return family == BMC_RATE_FAST_8CYC || family == BMC_RATE_OC_16CYC;
+}
 
 // -------------------------------------------------------------
 // ハードウェアおよびドライバ状態
@@ -79,6 +92,8 @@ static PIO s_bmc_pio_rx = pio1;
 static bmc_tx_controller_t s_bmc_tx;
 static bmc_rx_port_t s_bmc_rx;
 static uart_driver_t s_uart_drv;
+static pio_uart_driver_t s_pio_uart_drv;
+static bool s_use_pio_uart = false;
 
 static poc_transport_t s_active_transport;
 static bench_mode_t s_current_mode = MODE_BMC_3M;
@@ -86,7 +101,19 @@ static bool s_benchmark_running = true;
 // B-3: 18.75M(8 cyc/bit)は実機実測でFAST+8mA駆動でのみ全レート安定動作したため既定をFASTにする。
 // このフラグはBMC_RATE_FAST_8CYCのときのみ有効 (bmc_tx_ensure_sm_residentでゲート済み)。
 // 16/12/10 cyc/bitの既定はSLOW+4mAのまま変更しない (実績のある設定を壊さない方針)。
-static bool s_pad_fast_variant = true; // B-3: 18.75M用パッド変種、既定をFAST Slew+8mAに変更
+static bmc_pad_slew_t s_pad_slew = BMC_PAD_SLEW_FAST;   // B-3既定を維持 (FAST_8CYCのみ適用)
+static bmc_pad_drive_t s_pad_drive = BMC_PAD_DRIVE_8MA;  // B-3既定を維持 (FAST_8CYCのみ適用)
+static bool s_tx_use_isr = false; // NIPPON: TX方式 (false=自ピン読み戻し版/既定, true=ISR極性保持版, FAST_8CYCのみ実装)
+
+static const char *pad_drive_to_str(bmc_pad_drive_t drive) {
+    switch (drive) {
+        case BMC_PAD_DRIVE_2MA:  return "2mA";
+        case BMC_PAD_DRIVE_4MA:  return "4mA";
+        case BMC_PAD_DRIVE_8MA:  return "8mA";
+        case BMC_PAD_DRIVE_12MA: return "12mA";
+        default:                 return "?mA";
+    }
+}
 static bool s_auto_sweep = false;
 static uint32_t s_sweep_mode_start_ms = 0;
 #define SWEEP_DURATION_MS 4000
@@ -166,22 +193,30 @@ static bool uart_transport_send(void *ctx, uint pin, const uint32_t *dma_buf, si
     const uint8_t *wire_bytes = (const uint8_t *)&dma_buf[1];
     const uint8_t *post_sync = wire_bytes + BMC_PREAMBLE_SYNC_BYTES;
     size_t post_sync_len = bmc_packet_total_bytes(payload_len);
+    if (s_use_pio_uart) {
+        return pio_uart_tx_send_packet_blocking(&s_pio_uart_drv, post_sync, post_sync_len, payload_len);
+    }
     return uart_tx_send_packet_blocking(&s_uart_drv, post_sync, post_sync_len, payload_len);
 }
 
 static bool uart_transport_poll(void *ctx, uint8_t *out_type, uint8_t *out_seq, uint8_t *out_payload, uint8_t *out_len) {
     (void)ctx;
+    if (s_use_pio_uart) {
+        return pio_uart_rx_poll_packet(&s_pio_uart_drv, out_type, out_seq, out_payload, out_len);
+    }
     return uart_rx_poll_packet(&s_uart_drv, out_type, out_seq, out_payload, out_len);
 }
 
 static void uart_transport_get_stats(const void *ctx, poc_stats_t *out_stats) {
     (void)ctx;
-    uart_get_stats(&s_uart_drv, out_stats);
+    if (s_use_pio_uart) pio_uart_get_stats(&s_pio_uart_drv, out_stats);
+    else uart_get_stats(&s_uart_drv, out_stats);
 }
 
 static void uart_transport_reset_stats(void *ctx) {
     (void)ctx;
-    uart_reset_stats(&s_uart_drv);
+    if (s_use_pio_uart) pio_uart_reset_stats(&s_pio_uart_drv);
+    else uart_reset_stats(&s_uart_drv);
 }
 
 // -------------------------------------------------------------
@@ -271,6 +306,8 @@ static void stop_all_hardware(void) {
     bmc_rx_port_deinit(&s_bmc_rx);
     bmc_tx_controller_deinit(&s_bmc_tx);
     uart_driver_deinit(&s_uart_drv);
+    pio_uart_driver_deinit(&s_pio_uart_drv);
+    s_use_pio_uart = false;
 
     pio_clear_instruction_memory(s_bmc_pio_tx);
     pio_clear_instruction_memory(s_bmc_pio_rx);
@@ -292,6 +329,11 @@ static bool setup_bmc(float clkdiv, bmc_rate_family_t rate_family) {
         return false;
     }
 
+    /* bmc_tx_controller_init reserves the standard TX program for standalone callers.
+     * This benchmark loads the selected family below; release that reservation first,
+     * otherwise self-read + ISR variants can exceed the 32-word PIO instruction RAM. */
+    pio_remove_program(s_bmc_pio_tx, &bmc_tx_program, s_bmc_tx.offset_tx);
+
     uint off_tx, off_rx;
     const char *transport_name;
     bool is_exp = false;
@@ -311,23 +353,50 @@ static bool setup_bmc(float clkdiv, bmc_rate_family_t rate_family) {
             target_phy = 15.000f;
             break;
         case BMC_RATE_FAST_8CYC:
-            off_tx = pio_add_program(s_bmc_pio_tx, &bmc_fast_tx_program);
-            off_rx = pio_add_program(s_bmc_pio_rx, &bmc_fast_rx_program);
-            transport_name = "BMC 18.75M (Fast)";
+        case BMC_RATE_OC_16CYC: {
+            const bool oc16 = rate_family == BMC_RATE_OC_16CYC;
+            const pio_program_t *tx_program = oc16 ? &bmc_tx_program : &bmc_fast_tx_program;
+            const pio_program_t *rx_program = oc16 ? &bmc_rx_program : &bmc_fast_rx_program;
+            const pio_program_t *isr_program = oc16 ? &bmc_tx_isr_program : &bmc_fast_tx_isr_program;
+            off_tx = pio_add_program(s_bmc_pio_tx, tx_program);
+            off_rx = pio_add_program(s_bmc_pio_rx, rx_program);
+            int off_tx_isr_result = pio_add_program(s_bmc_pio_tx, isr_program);
+            uint off_tx_isr = (off_tx_isr_result >= 0)
+                ? (uint)off_tx_isr_result : BMC_TX_OFFSET_INVALID;
+            if (off_tx_isr == BMC_TX_OFFSET_INVALID) {
+                printf("[WARN] Could not load ISR TX variant; keeping self-pin TX only.\n");
+            }
+            transport_name = oc16 ? "BMC 18.75M (300MHz/16cyc)" : "BMC 18.75M (Fast8)";
             is_exp = true;
             target_phy = 18.750f;
-            break;
+            bmc_tx_controller_set_pad_slew(&s_bmc_tx, s_pad_slew);
+            bmc_tx_controller_set_pad_drive(&s_bmc_tx, s_pad_drive);
+            bmc_tx_controller_set_mode_ex(&s_bmc_tx, off_tx, off_tx_isr, clkdiv, rate_family);
+            if (!bmc_tx_controller_set_tx_variant(&s_bmc_tx, s_tx_use_isr)) {
+                s_tx_use_isr = false;
+                printf("[WARN] ISR TX unavailable; using self-pin TX.\n");
+            }
+            bmc_tx_controller_prime(&s_bmc_tx, PIN_TX);
+            if (!bmc_rx_port_init_ex(&s_bmc_rx, s_bmc_pio_rx, 0, off_rx, PIN_RX, clkdiv, rate_family)) {
+                printf("[ERROR] Failed to init BMC RX port\\n");
+                bmc_tx_controller_deinit(&s_bmc_tx);
+                return false;
+            }
+            s_active_transport = (poc_transport_t){
+                .name = transport_name, .is_experimental = is_exp, .target_phy_mbps = target_phy,
+                .send_packet = bmc_transport_send, .poll_packet = bmc_transport_poll,
+                .get_stats = bmc_transport_get_stats, .reset_stats = bmc_transport_reset_stats, .ctx = NULL
+            };
+            return true;
+        }
         case BMC_RATE_STD_16CYC:
         default:
             off_tx = pio_add_program(s_bmc_pio_tx, &bmc_tx_program);
             off_rx = pio_add_program(s_bmc_pio_rx, &bmc_rx_program);
             transport_name = "BMC Standard";
-            target_phy = (clkdiv == 1.0f) ? 9.375f : 3.125f;
+            target_phy = (float)clock_get_hz(clk_sys) / clkdiv / 16.0f / 1000000.0f;
             break;
     }
-
-    // B-1: パッド設定バリアントの適用 (FAST_8CYC時のみFAST+8mAが有効)
-    bmc_tx_controller_set_pad_variant(&s_bmc_tx, s_pad_fast_variant);
 
     bmc_tx_controller_set_mode(&s_bmc_tx, off_tx, clkdiv, rate_family);
     bmc_tx_controller_prime(&s_bmc_tx, PIN_TX);
@@ -351,18 +420,27 @@ static bool setup_bmc(float clkdiv, bmc_rate_family_t rate_family) {
 }
 
 static bool setup_uart(uint32_t baudrate) {
+    const bool use_pio_uart = (baudrate & PIO_UART_BAUD_FLAG) != 0;
+    baudrate &= ~PIO_UART_BAUD_FLAG;
     stop_all_hardware();
 
-    clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS,
-                    clock_get_hz(clk_sys), clock_get_hz(clk_sys));
-
-    if (!uart_driver_init(&s_uart_drv, UART_ID, PIN_TX, PIN_RX, baudrate)) {
-        printf("[ERROR] Failed to init UART driver\n");
+    bool initialized;
+    if (use_pio_uart) {
+        initialized = pio_uart_driver_init(&s_pio_uart_drv, PIN_TX, PIN_RX, baudrate);
+        s_use_pio_uart = initialized;
+    } else {
+        const uint32_t sys_hz = clock_get_hz(clk_sys);
+        clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS,
+                        sys_hz, sys_hz / 2u);
+        initialized = uart_driver_init(&s_uart_drv, UART_ID, PIN_TX, PIN_RX, baudrate);
+    }
+    if (!initialized) {
+        printf("[ERROR] Failed to init %s driver\n", use_pio_uart ? "PIO UART" : "UART");
         return false;
     }
 
     s_active_transport = (poc_transport_t){
-        .name = "UART DMA",
+        .name = use_pio_uart ? "PIO UART DMA" : "UART DMA",
         .is_experimental = false,
         .target_phy_mbps = (float)baudrate / 1e6f,
         .send_packet = uart_transport_send,
@@ -388,8 +466,11 @@ static bool apply_mode(bench_mode_t mode) {
     const mode_desc_t *desc = &MODE_DESCS[mode];
 
     printf("\n[MODE CHANGE] >>> %s %s <<<\n", desc->name, desc->is_experimental ? "(EXPERIMENTAL)" : "");
-    if (!desc->is_uart && desc->rate_family == BMC_RATE_FAST_8CYC) {
-        printf("  TX Pad Config: %s\n", s_pad_fast_variant ? "FAST Slew + 8mA Drive" : "SLOW Slew + 4mA Drive (Default)");
+    if (!desc->is_uart && bmc_is_18m_rate(desc->rate_family)) {
+        printf("  TX Pad Config: Slew=%s, Drive=%s\n",
+               (s_pad_slew == BMC_PAD_SLEW_FAST) ? "FAST" : "SLOW",
+               pad_drive_to_str(s_pad_drive));
+        printf("  TX Variant: %s\n", s_tx_use_isr ? "ISR極性保持版" : "自ピン読み戻し版 (Default)");
     }
 
     bool ok = desc->is_uart ? setup_uart(desc->uart_baud) : setup_bmc(desc->bmc_clkdiv, desc->rate_family);
@@ -791,8 +872,10 @@ static void benchmark_maybe_report(void) {
         s_stats.avg_rx_kibps = app_rx_kibps;
 
         float avg_rtt_us = (s_stats.rtt_samples > 0) ? ((float)s_stats.rtt_total_us / s_stats.rtt_samples) : 0.0f;
+        const mode_desc_t *cur_desc = &MODE_DESCS[s_current_mode];
+        float bits_per_wire_byte = cur_desc->is_uart ? 10.0f : 8.0f;
         float phy_wire_mbps = (delta_phy_us > 0) ?
-                              ((float)(s_stats.tx_wire_bytes) * 8.0f / (float)s_stats.tx_phy_duration_us) : 0.0f;
+                              ((float)(s_stats.tx_wire_bytes) * bits_per_wire_byte / (float)s_stats.tx_phy_duration_us) : 0.0f;
         float line_util_pct = (elapsed_ms > 0) ?
                               ((float)delta_phy_us / ((float)elapsed_ms * 1000.0f) * 100.0f) : 0.0f;
         if (line_util_pct > 100.0f) line_util_pct = 100.0f;
@@ -800,8 +883,6 @@ static void benchmark_maybe_report(void) {
         // B-3: LineUtil(calc) — tx_phy_duration_us の計測経路を経由しない独立検証値。
         // 実測 wire バイト数と対象トランスポートの理論ビット/バイト・目標PHYレートのみから
         // 理論専有時間を逆算する。line_util_pct との乖離は計測区間側の欠落/重複を示唆する。
-        const mode_desc_t *cur_desc = &MODE_DESCS[s_current_mode];
-        float bits_per_wire_byte = cur_desc->is_uart ? 10.0f : 8.0f;
         float target_bps = cur_desc->target_phy_mbps * 1e6f;
         float calc_line_util_pct = 0.0f;
         if (elapsed_ms > 0 && target_bps > 0.0f) {
@@ -969,15 +1050,54 @@ static void benchmark_process_input(void) {
     } else if (ch == 'y' || ch == 'Y') {
         s_auto_sweep = false;
         apply_mode(MODE_BMC_18M_BURST);
+    } else if (ch == 'k' || ch == 'K') {
+        s_auto_sweep = false;
+        apply_mode(MODE_PIO_UART_9M_BURST);
+    } else if (ch == 'm' || ch == 'M') {
+        s_auto_sweep = false;
+        apply_mode(MODE_PIO_UART_18M_BURST);
+    } else if (ch == 'n' || ch == 'N') {
+        s_auto_sweep = false;
+        apply_mode(MODE_PIO_UART_37M_BURST);
     } else if (ch == 'p' || ch == 'P') {
-        s_pad_fast_variant = !s_pad_fast_variant;
-        printf("\n>>> TX Pad Variant toggled: %s <<<\n",
-               s_pad_fast_variant ? "FAST Slew + 8mA Drive (Default for 18.75M)" : "SLOW Slew + 4mA Drive");
-        if (!MODE_DESCS[s_current_mode].is_uart && MODE_DESCS[s_current_mode].rate_family == BMC_RATE_FAST_8CYC) {
-            bmc_tx_controller_set_pad_variant(&s_bmc_tx, s_pad_fast_variant);
+        s_pad_slew = (s_pad_slew == BMC_PAD_SLEW_SLOW) ? BMC_PAD_SLEW_FAST : BMC_PAD_SLEW_SLOW;
+        printf("\n>>> TX Pad Slew toggled: %s <<<\n", (s_pad_slew == BMC_PAD_SLEW_FAST) ? "FAST" : "SLOW");
+        if (!MODE_DESCS[s_current_mode].is_uart && bmc_is_18m_rate(MODE_DESCS[s_current_mode].rate_family)) {
+            bmc_tx_controller_set_pad_slew(&s_bmc_tx, s_pad_slew);
             printf("    Applied to running BMC 18.75M TX SM.\n");
         } else {
-            printf("    (Note: FAST pad variant takes effect in BMC 18.75M mode)\n");
+            printf("    (Note: pad slew takes effect in BMC 18.75M mode)\n");
+        }
+        printf("\n");
+    } else if (ch == 'l' || ch == 'L') {
+        switch (s_pad_drive) {
+            case BMC_PAD_DRIVE_2MA:  s_pad_drive = BMC_PAD_DRIVE_4MA;  break;
+            case BMC_PAD_DRIVE_4MA:  s_pad_drive = BMC_PAD_DRIVE_8MA;  break;
+            case BMC_PAD_DRIVE_8MA:  s_pad_drive = BMC_PAD_DRIVE_12MA; break;
+            case BMC_PAD_DRIVE_12MA:
+            default:                 s_pad_drive = BMC_PAD_DRIVE_2MA;  break;
+        }
+        printf("\n>>> TX Pad Drive cycled: %s <<<\n", pad_drive_to_str(s_pad_drive));
+        if (!MODE_DESCS[s_current_mode].is_uart && bmc_is_18m_rate(MODE_DESCS[s_current_mode].rate_family)) {
+            bmc_tx_controller_set_pad_drive(&s_bmc_tx, s_pad_drive);
+            printf("    Applied to running BMC 18.75M TX SM.\n");
+        } else {
+            printf("    (Note: pad drive takes effect in BMC 18.75M mode)\n");
+        }
+        printf("\n");
+    } else if (ch == 'i' || ch == 'I') {
+        s_tx_use_isr = !s_tx_use_isr;
+        printf("\n>>> TX Variant toggled: %s <<<\n", s_tx_use_isr ? "ISR極性保持版" : "自ピン読み戻し版 (Default)");
+        if (!MODE_DESCS[s_current_mode].is_uart && bmc_is_18m_rate(MODE_DESCS[s_current_mode].rate_family)) {
+            bool applied = bmc_tx_controller_set_tx_variant(&s_bmc_tx, s_tx_use_isr);
+            if (applied) {
+                printf("    Applied to running BMC 18.75M TX SM.\n");
+            } else {
+                s_tx_use_isr = false;
+                printf("    [WARN] ISR variant unavailable, fell back to self-pin readback.\n");
+            }
+        } else {
+            printf("    (Note: TX variant takes effect in BMC 18.75M mode)\n");
         }
         printf("\n");
     } else if (ch == 'o' || ch == 'O') {
@@ -1029,23 +1149,28 @@ static void benchmark_print_banner(void) {
     printf("  コマンド一覧:\n");
     printf("    [1] UART  3.000 Mbps (標準DMA, 停止待ち)\n");
     printf("    [2] UART  9.375 Mbps (UART ハードウェア限界, 停止待ち)\n");
-    printf("    [3] BMC   3.125 Mbps (16 cyc/bit, clkdiv 3.0f, PoC標準, 停止待ち)\n");
-    printf("    [4] BMC   9.375 Mbps (16 cyc/bit, clkdiv 1.0f, 停止待ち)\n");
-    printf("    [5] BMC  18.750 Mbps ( 8 cyc/bit, clkdiv 1.0f, EXPERIMENTAL, 停止待ち)\n");
+    printf("    [3] BMC   3.125 Mbps (16 cyc/bit, clkdiv 6.0f @ 300MHz, 停止待ち)\n");
+    printf("    [4] BMC   9.375 Mbps (16 cyc/bit, clkdiv 2.0f @ 300MHz, 停止待ち)\n");
+    printf("    [5] BMC  18.750 Mbps (16 cyc/bit @ 300MHz, EXPERIMENTAL OC, 停止待ち)\n");
     printf("    [6] UART  3.000 Mbps (Burst 連続送信, Dual-Core RX)\n");
     printf("    [7] UART  9.375 Mbps (Burst 連続送信, Dual-Core RX)\n");
     printf("    [8] BMC   3.125 Mbps (Burst 連続送信, Dual-Core RX)\n");
     printf("    [9] BMC   9.375 Mbps (Burst 連続送信, Dual-Core RX)\n");
-    printf("    [q] BMC  12.500 Mbps (12 cyc/bit, clkdiv 1.0f, 停止待ち)\n");
-    printf("    [w] BMC  12.500 Mbps (Burst 連続送信, Dual-Core RX)\n");
-    printf("    [e] BMC  15.000 Mbps (10 cyc/bit, clkdiv 1.0f, 停止待ち)\n");
-    printf("    [t] BMC  15.000 Mbps (Burst 連続送信, Dual-Core RX)\n");
-    printf("    [y] BMC  18.750 Mbps ( 8 cyc/bit, clkdiv 1.0f, EXPERIMENTAL, Burst 連続送信)\n");
+    printf("    [q] BMC  12.500 Mbps (12 cyc/bit, clkdiv 2.0f @ 300MHz, 停止待ち)\n");
+    printf("    [w] BMC  12.500 Mbps (12 cyc/bit @ 300MHz, Burst 連続送信)\n");
+    printf("    [e] BMC  15.000 Mbps (10 cyc/bit, clkdiv 2.0f @ 300MHz, 停止待ち)\n");
+    printf("    [t] BMC  15.000 Mbps (10 cyc/bit @ 300MHz, Burst 連続送信)\n");
+    printf("    [y] BMC  18.750 Mbps (16 cyc/bit @ 300MHz, EXPERIMENTAL OC, Burst 連続送信)\n");
+    printf("    [k] PIO UART  9.375 Mbps Burst (official 8N1 PIO + DMA)\n");
+    printf("    [m] PIO UART 18.750 Mbps Burst (official 8N1 PIO + DMA)\n");
+    printf("    [n] PIO UART 37.500 Mbps Burst (official 8N1 PIO + DMA, EXPERIMENTAL)\n");
     printf("    [a] または [s]: 全モード自動スイープ比較 (各4秒計測 & サマリー表出力)\n");
     printf("    [ ] (スペース): 一時停止 / 再開\n");
     printf("    [r]: 統計リセット\n");
     printf("    [c]: 配線導通テスト\n");
-    printf("    [p]: TXパッド設定トグル (FAST+8mA[既定,18.75M専用適用] / SLOW+4mA, 18.75M以外には無効)\n");
+    printf("    [p]: TXパッドスルーレート トグル (SLOW/FAST, 既定FAST, 18.75M専用適用)\n");
+    printf("    [l]: TXパッド駆動電流 サイクル (2/4/8/12 mA, 既定8mA, 18.75M専用適用)\n");
+    printf("    [i]: TX方式トグル (自ピン読み戻し版[既定] / ISR極性保持版, 18.75M専用適用)\n");
     printf("    [d]: RX生データ診断ダンプ (1回限り)\n");
     printf("    [o]: 単発送信診断 (現在のモードで1フレームだけ送信し、後続フレームなしで受理できたか表示)\n");
     printf("======================================================================\n\n");
@@ -1055,6 +1180,7 @@ static void benchmark_init_hardware(void) {
     bmc_tx_controller_zero(&s_bmc_tx);
     bmc_rx_port_zero(&s_bmc_rx);
     uart_driver_zero(&s_uart_drv);
+    pio_uart_driver_zero(&s_pio_uart_drv);
 }
 
 static void benchmark_wait_for_usb(void) {
@@ -1068,6 +1194,11 @@ static void benchmark_wait_for_usb(void) {
 // M-1: メイン関数 (80行以内を厳格遵守)
 // -------------------------------------------------------------
 int main(void) {
+    if (!poc_configure_300mhz()) {
+        stdio_init_all();
+        printf("[FATAL] Could not configure RP2350 for 300MHz operation\n");
+        return 1;
+    }
     stdio_init_all();
     benchmark_wait_for_usb();
     build_info_print("poc_benchmark");

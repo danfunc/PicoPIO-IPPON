@@ -42,6 +42,9 @@ static inline float bmc_get_clkdiv(void) {
 // RX DMA reload ワード数 (RP2350 TRIGGER_SELF 28bit最大値: 0x0FFFFFFF ≈ 268M words ≈ 1.07GB)
 #define BMC_RX_DMA_RELOAD_WORDS 0x0FFFFFFFu
 
+// TX プログラム無効オフセット定義
+#define BMC_TX_OFFSET_INVALID   0xFFFFFFFFu
+
 // ============================================================================
 // レートファミリー定義 (A-2)
 // ============================================================================
@@ -49,8 +52,24 @@ typedef enum {
     BMC_RATE_STD_16CYC = 0,  // 16 cyc/bit (3.125M/9.375M, 既存標準)
     BMC_RATE_MID_12CYC,      // 12 cyc/bit (12.5Mbps, 新規)
     BMC_RATE_MID_10CYC,      // 10 cyc/bit (15.0Mbps, 新規)
-    BMC_RATE_FAST_8CYC       // 8 cyc/bit (18.75Mbps, 既存高速実験)
+    BMC_RATE_FAST_8CYC,      // 8 cyc/bit (18.75Mbps, 既存高速実験)
+    BMC_RATE_OC_16CYC        // 16 cyc/bit (18.75Mbps at 300MHz)
 } bmc_rate_family_t;
+
+// ============================================================================
+// パッド電気特性設定 (スルーレート / 駆動電流)
+// ============================================================================
+typedef enum {
+    BMC_PAD_SLEW_SLOW = 0,
+    BMC_PAD_SLEW_FAST = 1
+} bmc_pad_slew_t;
+
+typedef enum {
+    BMC_PAD_DRIVE_2MA = 0,
+    BMC_PAD_DRIVE_4MA = 1,
+    BMC_PAD_DRIVE_8MA = 2,
+    BMC_PAD_DRIVE_12MA = 3
+} bmc_pad_drive_t;
 
 // ============================================================================
 // TX共有コントローラ構造体 (常駐型SM)
@@ -59,12 +78,15 @@ typedef struct {
     PIO pio;
     uint sm_tx;
     uint irq_num;                          // NIPPON: 送信完了IRQ番号 (= sm_tx & 3, "irq set 0 rel" 使用時の実効フラグ番号)
-    uint offset_tx;
+    uint offset_tx;                        // 自ピン読み戻し版TXプログラムのオフセット (無効時: BMC_TX_OFFSET_INVALID)
+    uint offset_tx_isr;                    // ISR極性保持版TXプログラムのオフセット (無効時: BMC_TX_OFFSET_INVALID)
     int dma_tx_chan;
     uint current_tx_pin;
     float clkdiv;
     bmc_rate_family_t rate_family;
-    bool pad_fast_variant;                // B-1: FASTスルーレート+8mA駆動変種 (FAST_8CYC専用)
+    bmc_pad_slew_t pad_slew;               // パッドスルーレート設定 (SLOW / FAST, FAST_8CYC/OC_16CYC専用)
+    bmc_pad_drive_t pad_drive;             // パッド駆動電流設定 (2mA / 4mA / 8mA / 12mA, FAST_8CYC/OC_16CYC専用)
+    bool tx_use_isr_variant;               // true: ISR極性保持版, false: 自ピン読み戻し版
     bool is_initialized;
     const uint32_t *pending_dma_buf;      // 非同期送信中のDMAソースバッファ (統計計算用)
     size_t pending_total_dma_words;       // 同上、総ワード数
@@ -122,15 +144,41 @@ void bmc_rx_port_zero(bmc_rx_port_t *rx);
 void bmc_rx_port_deinit(bmc_rx_port_t *rx);
 
 /**
- * @brief TXコントローラのモード設定
+ * @brief TXコントローラのモード設定 (従来互換: ISR版オフセットは無効)
  */
 void bmc_tx_controller_set_mode(bmc_tx_controller_t *tx, uint offset_tx,
                                 float clkdiv, bmc_rate_family_t rate_family);
 
 /**
- * @brief TX常駐SMのパッド設定バリアント更新 (B-1: FAST_8CYC専用)
+ * @brief TXコントローラのモード設定 (拡張: 自ピン読み戻し版とISR版の両オフセット指定可能)
+ */
+void bmc_tx_controller_set_mode_ex(bmc_tx_controller_t *tx, uint offset_tx,
+                                   uint offset_tx_isr, float clkdiv,
+                                   bmc_rate_family_t rate_family);
+
+/**
+ * @brief TXパッドのスルーレート設定 (FAST_8CYC専用)
+ */
+void bmc_tx_controller_set_pad_slew(bmc_tx_controller_t *tx, bmc_pad_slew_t pad_slew);
+
+/**
+ * @brief TXパッドの駆動電流設定 (FAST_8CYC専用)
+ */
+void bmc_tx_controller_set_pad_drive(bmc_tx_controller_t *tx, bmc_pad_drive_t pad_drive);
+
+/**
+ * @brief TX常駐SMのパッド設定バリアント更新 (後方互換用: FAST_8CYC専用)
+ *        false: SLOW + 4mA, true: FAST + 8mA
  */
 void bmc_tx_controller_set_pad_variant(bmc_tx_controller_t *tx, bool pad_fast_variant);
+
+/**
+ * @brief TX方式バリアント設定 (自ピン読み戻し版 vs ISR極性保持版)
+ * @param tx TXコントローラ
+ * @param use_isr true: ISR保持版, false: 自ピン読み戻し版
+ * @return bool 設定成功時 true, ISR版オフセットが無効でフォールバックした時 false
+ */
+bool bmc_tx_controller_set_tx_variant(bmc_tx_controller_t *tx, bool use_isr);
 
 /**
  * @brief TX常駐SMを明示的に即時確立する (RX起動前の呼出しを保証するため)
