@@ -32,6 +32,7 @@ void ota_receiver_reset(ota_receiver_t *rx) {
     rx->image_crc32 = 0;
     rx->total_windows = 0;
     rx->windows_committed = 0;
+    rx->has_last_ready = false;
     for (int i = 0; i < 2; ++i) {
         rx->slots[i].state = OTA_SLOT_FREE;
         rx->slots[i].win_idx = 0;
@@ -157,6 +158,13 @@ bool BMC_SRAM_FUNC(ota_receiver_process_packet)(ota_receiver_t *rx, const uint8_
             ota_window_slot_t *slot = &rx->slots[slot_idx];
 
             if (slot->state == OTA_SLOT_FREE || slot->win_idx != pkt->win_idx) {
+                /* NIPPON: 既にcommit済みの窓に対する再QUERY(READY喪失からの回復)は、
+                 * スロットがFREE化されて中身の手がかりを失っていても、直近送出READYの
+                 * キャッシュと一致すればそれを再送する。一致しなければ本当に未知の窓。 */
+                if (rx->has_last_ready && rx->last_ready.win_idx == pkt->win_idx) {
+                    rx_send_response(rx, &rx->last_ready, sizeof(rx->last_ready));
+                    return true;
+                }
                 /* Unknown or uninitialized window */
                 ota_query_resp_pkt_t resp;
                 memset(&resp, 0, sizeof(resp));
@@ -369,6 +377,8 @@ bool BMC_SRAM_FUNC(ota_receiver_step_flash)(ota_receiver_t *rx) {
             .credit_granted = 1,
             .readback_crc32 = readback_crc
         };
+        rx->last_ready = ready;
+        rx->has_last_ready = true;
         rx_send_response(rx, &ready, sizeof(ready));
     } else {
         /* Readback mismatch! */

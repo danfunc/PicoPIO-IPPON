@@ -77,6 +77,12 @@ typedef struct {
     uint16_t          windows_committed;
     uint8_t           tx_seq;
     ota_window_slot_t slots[2];   /* 2 x 64KB double buffer */
+    /* NIPPON: 直近に送出したREADYのキャッシュ。線Bでの喪失時、送り手からの
+     * 再QUERYに対してREADYを再送できるようにする(スロットは commit 後 FREE に
+     * 遷移し win_idx 以外の情報を失うため、これが無いと「未知の窓」として
+     * missing_count=total_chunks を返してしまい、誤った全再送を誘発する)。 */
+    bool              has_last_ready;
+    ota_ready_pkt_t   last_ready;
     ota_rx_stats_t    stats;
 } ota_receiver_t;
 

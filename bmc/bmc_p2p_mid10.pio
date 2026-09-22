@@ -62,7 +62,7 @@ check_bit:
 
     ; --- 全パケット送出完了 (EOP) ---
     set pins, 1             ; 13: 最終ビット完了: 即座にHigh能動出力
-    irq set 0               ; 14: パケット物理送出の完全終了をCPU/DMAへ通知
+    irq set 0 rel               ; 14: パケット物理送出の完全終了をCPU/DMAへ通知 (rel: RP2350データシート 3.4.7.3、SM番号+0を8で剰余しIRQフラグを自動分離)
 .wrap
 
 
@@ -144,7 +144,7 @@ static inline void bmc_mid10_tx_program_init(PIO pio, uint sm, uint offset, uint
     // 3. ラッチHigh / 方向OUT準備してからPIOへ切替
     pio_sm_set_pins_with_mask(pio, sm, 1u << pin, 1u << pin);
     pio_sm_set_pindirs_with_mask(pio, sm, 1u << pin, 1u << pin);
-    gpio_set_function(pin, (pio == pio0) ? GPIO_FUNC_PIO0 : GPIO_FUNC_PIO1);
+    gpio_set_function(pin, (gpio_function_t)pio_get_funcsel(pio)); // pio0/1/2 いずれにも正しく対応 (pico-sdk hardware/pio.h)
 }
 
 static inline void bmc_mid10_rx_program_init(PIO pio, uint sm, uint offset, uint pin, float clkdiv) {

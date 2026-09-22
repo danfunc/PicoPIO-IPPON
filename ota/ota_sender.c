@@ -371,10 +371,29 @@ bool BMC_SRAM_FUNC(ota_sender_step)(ota_sender_t *tx) {
         }
 
         case OTA_TX_STATE_WAIT_READY: {
+            /* NIPPON: READY(受け手->送り手, 線B想定)が喪失した場合の回復。
+             * query_timeout_us 毎に、まだ確定していない窓(tx->commit_win_idx)への
+             * QUERYを再送する。受け手はcommit済みなら last_ready キャッシュを
+             * 再送し(ota_receiver.c)、まだ書き込み中なら通常のQUERY_RESPを返す
+             * (この時 tx->state はWAIT_READYのままなのでQUERY_RESPは無視される=害はない)。
+             * MAX_TIMEOUT_RETRIES 回再送しても復帰しなければ FAILED とする。 */
             uint64_t now = get_time_us();
-            if (now - tx->state_enter_us > 10000000ull) { /* 10s flash timeout */
-                tx->state = OTA_TX_STATE_FAILED;
-                return false;
+            if (now - tx->state_enter_us > tx->config.query_timeout_us) {
+                tx->retries++;
+                if (tx->retries > MAX_TIMEOUT_RETRIES) {
+                    tx->state = OTA_TX_STATE_FAILED;
+                    return false;
+                }
+                ota_query_pkt_t q = {
+                    .pkt_type = OTA_PKT_TYPE_QUERY,
+                    .win_idx = (uint8_t)tx->commit_win_idx,
+                    .reserved = 0,
+                    .win_crc32 = tx->current_win_crc32,
+                    .win_bytes = tx->current_win_bytes
+                };
+                tx_send_pkt(tx, &q, sizeof(q));
+                tx->stats.queries_sent++;
+                tx->state_enter_us = now;
             }
             return true;
         }
