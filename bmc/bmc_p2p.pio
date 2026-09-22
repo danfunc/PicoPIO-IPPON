@@ -1,0 +1,174 @@
+; -----------------------------------------------------------------------------
+; RP2350 Differential Manchester (BMC) Transceiver
+; 3.125 Mbps @ 150MHz sysclk (clkdiv = 3.0f -> 50MHz PIO Clock, 20ns/cycle)
+; TX cell timing: within-word cells nominal 16 cycles, final cell at word boundary 18 cycles
+; 【RP2350 PIOメモリ構成 (B-3)】
+; 本PoCでは TX が pio0、RX が pio1 に分離配置され、各PIOブロックが独立した32ワードの
+; 命令メモリ空間を持ちます。TXとRXは決して単一の32ワードメモリを共有しません。
+; - TX (bmc_tx): 14/32 ワード (pio0 独立予算, 18 free)
+; - RX (bmc_rx): 17/32 ワード (pio1 独立予算, 15 free)
+; 生成されたプログラムは独立しており、呼出元 (main_benchmark / main_bmc_loopback) にて
+; 明示的に TX->pio0, RX->pio1 へマッピングされます。
+;
+; =============================================================================
+; 【H-8: Standard / Fast PIO Paired-Copy Maintenance Policy】
+; -----------------------------------------------------------------------------
+; 本ファイル (bmc_p2p.pio: 16cyc/bit) と高速版 (bmc_p2p_fast.pio: 8cyc/bit) は、
+; PIO命令セットおよびビルドシステム (pico_generate_pio_header / pioasm) が
+; プログラム間・ファイル間での動的ディレイ引数共有やインクルードをサポートしない制約上、
+; 対となる2つのソースファイルとして独立維持される。
+;
+; [同期保守ルール (Maintenance Invariants)]:
+; 1. 命令シーケンスの対称性:
+;    TX (idle -> pull -> word_loop -> bit_loop -> check_bit -> EOP) および
+;    RX (wait_sop -> was_low -> got_0/1 -> wait boundary -> jmp) の構造・
+;    レジスタ割当 (X, Y, OSR, ISR)・ピン制御ロジックは常に完全に一致させる。
+; 2. ディレイ値の対応関係:
+;    Standard (16cyc)    Fast (8cyc)      目的
+;    ----------------    -----------      ----
+;    jmp !x, is_zero [5] jmp !x [1]       前半境界〜中央反転遅延 (計8cyc vs 計4cyc)
+;    mov pins [5]        mov pins [1]     中央反転〜ビット終端遅延
+;    nop [6]             nop [2]          ビット0時のレベル維持遅延
+;    nop [9] (RX)        nop [3] (RX)     境界エッジ〜サンプリング遅延 (Cycle 12 vs Cycle 6)
+; 3. 仕様変更時の義務:
+;    一方のファイルに制御フロー・命令・ヘッダAPIの変更を加えた場合、
+;    必ずもう一方のファイルにも対応するディレイ比率で同一の変更を適用すること。
+; =============================================================================
+
+.program bmc_tx
+; --- TX: ワードカウント式・完全パケット送信器 (14命令) ---
+; 先頭ワードとして (送信総データワード数 - 1) を与えることで、
+; 途中ワード境界での誤IRQ・High復帰を排除し、パケット送出完了時のみ自律High化・IRQ通知を行う。
+;
+; [ワード境界におけるセル幅の拡大 (16 -> 18 サイクル)]
+; - 通常ビット (0..30ビット目):
+;     mov pins, !pins (1cyc) + out x, 1 (1cyc) + jmp !x [5] (6cyc) +
+;     (1: mov pins [5] (6cyc) + jmp (1cyc) / 0: nop [6] (7cyc)) + jmp !osre (1cyc) = 計16cyc
+; - ワード最終ビット (31ビット目):
+;     jmp !osre が不成立でフォールスルー (1cyc)
+;     jmp y--, word_loop (1cyc)
+;     pull block (1cyc)
+;     計18サイクル (16 -> 18サイクルへ拡大)。この2サイクルの拡大はRX側の wait 命令により
+;     次の境界エッジ到達まで待機することで安全に吸収される。
+.wrap_target
+idle:
+    set pins, 1             ; 1: 待機時は確実にHigh (3.3V) を能動出力
+    pull block              ; 2: パケットヘッダ長ワード取得 (Y = 総データワード数 - 1)
+    mov y, osr              ; 3: レジスタYへワードカウンタを格納
+
+word_loop:
+    pull block              ; 4: 送信データワード取得 (32bit)
+
+bit_loop:
+    mov pins, !pins         ; 5: 境界エッジ反転 (自ピン読み戻し反転) [1cyc]
+    out x, 1                ; 6: OSRから1ビット取得 [1cyc]
+    jmp !x, is_zero     [5] ; 7: 0なら前半中央反転スキップ (ディレイ5 -> 前半計8cyc)
+
+    ; --- ビット1: 中央反転 (8cyc境界で厳密反転) ---
+    mov pins, !pins     [5] ; 8: 中央反転 (ディレイ5 -> 14cyc目まで)
+    jmp check_bit           ; 9: 15cyc目
+
+is_zero:
+    ; --- ビット0: レベル維持 ---
+    nop                 [6] ; 10: 前半レベル維持 (ディレイ6 -> 15cyc目まで)
+
+check_bit:
+    jmp !osre, bit_loop     ; 11: OSRに残りがあれば次ビットへ [1cyc] (通常計16cyc, 最終ビットは18cyc)
+    jmp y--, word_loop      ; 12: パケット内に次ワードがあれば取得へ (1cyc)
+
+    ; --- 全パケット送出完了 (EOP) ---
+    set pins, 1             ; 13: 最終ビット完了: 即座にHigh能動出力
+    irq set 0               ; 14: パケット物理送出の完全終了をCPU/DMAへ通知
+.wrap
+
+
+.program bmc_rx
+; --- RX: SOP立下り起動・16cyc対応BMC復号器 (17命令) ---
+; Autopush: 有効 (32bit, threshold 32)
+;
+; [定常サンプリングタイミング (16 cycles/bit)]
+; wait satisfaction = cycle 0 としたときの厳密なサイクル配分:
+; - cycle 0: wait <polarity> pin 0 成立 (境界エッジ検出)
+; - cycle 1: jmp was_high / jmp was_low (1cyc)
+; - cycle 2..11: nop [9] (10cyc)
+; - cycle 12: jmp pin によるサンプリング実行 (中央反転 cycle 8 から +4cyc, 次境界 cycle 16 まで -4cyc, マージン±4cyc/±80ns)
+; - cycle 13: in null, 1 または in x, 1 (1cyc, ISRシフト)
+; - cycle 14: wait <polarity> pin 0 実行開始 (次境界エッジ待機)
+; - cycle 16 (通常) または cycle 18 (TXワード境界): 次の境界エッジが到来し wait 成立 (cycle 0)
+.wrap_target
+wait_sop:
+    wait 0 pin 0        ; 1: アイドル(High)からの立下りエッジ(SOP)待機
+
+was_low:
+    nop             [9] ; 2: 10サイクルディレイ (定常時:境界から11サイクル目到達)
+    jmp pin, got_1_from_low ; 3: 中央反転してHighならビット1 (12サイクル目でサンプリング)
+got_0_from_low:
+    in null, 1          ; 4: ビット0 (ISRへ0シフト)
+    wait 1 pin 0        ; 5: 次の境界エッジ (立上がり) 待機
+    jmp was_high        ; 6: 次状態へ (1サイクル消費)
+
+got_1_from_low:
+    in x, 1             ; 7: ビット1 (ISRへ1シフト)
+    wait 0 pin 0        ; 8: 次の境界エッジ (立下り) 待機
+    jmp was_low         ; 9: 次状態へ (1サイクル消費)
+
+was_high:
+    nop             [9] ; 10: 10サイクルディレイ (定常時:境界から11サイクル目到達)
+    jmp pin, got_0_from_high ; 11: High維持ならビット0 (12サイクル目でサンプリング)
+got_1_from_high:
+    in x, 1             ; 12: ビット1 (ISRへ1シフト)
+    wait 1 pin 0        ; 13: 次の境界エッジ (立上がり) 待機
+    jmp was_high        ; 14: 次状態へ (1サイクル消費)
+
+got_0_from_high:
+    in null, 1          ; 15: ビット0 (ISRへ0シフト)
+    wait 0 pin 0        ; 16: 次の境界エッジ (立下り) 待機
+    jmp was_low         ; 17: 次状態へ (1サイクル消費)
+.wrap
+
+% c-sdk {
+static inline void bmc_tx_program_init(PIO pio, uint sm, uint offset, uint pin, float clkdiv) {
+    // 1. SIOでHigh出力を保持
+    gpio_put(pin, 1);
+    gpio_set_dir(pin, GPIO_OUT);
+    gpio_set_function(pin, GPIO_FUNC_SIO);
+    gpio_set_slew_rate(pin, GPIO_SLEW_RATE_SLOW);
+    gpio_set_drive_strength(pin, GPIO_DRIVE_STRENGTH_4MA);
+    gpio_set_input_enabled(pin, true); // mov pins, !pins 用の自ピン入力マッピング
+
+    // 2. SM設定
+    pio_sm_config c = bmc_tx_program_get_default_config(offset);
+    sm_config_set_set_pins(&c, pin, 1);
+    sm_config_set_out_pins(&c, pin, 1);
+    sm_config_set_in_pins(&c, pin); // mov pins, !pins 用の自ピン入力マッピング
+    sm_config_set_out_shift(&c, false, false, 32); // MSB-first, autopull=false
+    sm_config_set_clkdiv(&c, clkdiv);
+
+    pio_sm_init(pio, sm, offset, &c);
+
+    // 3. SM停止状態でラッチHigh / 方向OUTを準備してからPIOファンクションへ切替 (グリッチ防止)
+    pio_sm_set_pins_with_mask(pio, sm, 1u << pin, 1u << pin);
+    pio_sm_set_pindirs_with_mask(pio, sm, 1u << pin, 1u << pin);
+    gpio_set_function(pin, (pio == pio0) ? GPIO_FUNC_PIO0 : GPIO_FUNC_PIO1);
+}
+
+static inline void bmc_rx_program_init(PIO pio, uint sm, uint offset, uint pin, float clkdiv) {
+    gpio_init(pin);
+    gpio_set_dir(pin, GPIO_IN);
+    gpio_pull_down(pin);
+    gpio_set_input_hysteresis_enabled(pin, true);
+
+    pio_gpio_init(pio, pin);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, false);
+
+    pio_sm_config c = bmc_rx_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin);
+    sm_config_set_jmp_pin(&c, pin);
+    sm_config_set_in_shift(&c, false, true, 32); // MSB-first, autopush=true (32bit)
+    sm_config_set_clkdiv(&c, clkdiv);
+
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_exec(pio, sm, pio_encode_mov_not(pio_x, pio_null)); // X = 0xFFFFFFFF (for in x, 1)
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}

@@ -1,0 +1,169 @@
+; -----------------------------------------------------------------------------
+; RP2350 Differential Manchester (BMC) Intermediate Transceiver (10 cycles/bit)
+; 15.0 Mbps @ 150MHz sysclk (clkdiv = 1.0f -> 150MHz PIO Clock, 6.67ns/cycle)
+; TX cell timing: within-word cells nominal 10 cycles, final cell at word boundary 12 cycles
+; 【RP2350 PIOメモリ構成 (B-3)】
+; 本PoCでは TX が pio0、RX が pio1 に分離配置され、各PIOブロックが独立した32ワードの
+; 命令メモリ空間を持ちます。TXとRXは決して単一の32ワードメモリを共有しません。
+; - TX (bmc_mid10_tx): 14/32 ワード (pio0 独立予算, 18 free)
+; - RX (bmc_mid10_rx): 18/32 ワード (pio1 独立予算, 14 free)
+; 生成されたプログラムは独立しており、呼出元 (main_benchmark / main_bmc_loopback) にて
+; 明示的に TX->pio0, RX->pio1 へマッピングされます。
+;
+; =============================================================================
+; 【H-8: Standard / Fast / Mid PIO Paired-Copy Maintenance Policy】
+; -----------------------------------------------------------------------------
+; 本ファイル (bmc_p2p_mid10.pio: 10cyc/bit) は、bmc_p2p_fast.pio (8cyc/bit) および
+; bmc_p2p.pio (16cyc/bit) と同一のアーキテクチャ構造を持つ。
+; [同期保守ルール]:
+; 命令シーケンス・レジスタ割当・制御フローは完全に一致させ、
+; ディレイ値のみを 10cyc/bit 比率に設定する。
+; =============================================================================
+
+.program bmc_mid10_tx
+; --- TX: 10cycワードカウント式パケット送信器 (14命令) ---
+; 先頭ワードとして (送信総データワード数 - 1) を与える。
+;
+; [ワード境界におけるセル幅の拡大 (10 -> 12 サイクル)]
+; - 通常ビット (0..30ビット目):
+;     mov pins, !pins (1cyc) + out x, 1 (1cyc) + jmp !x [2] (3cyc) +
+;     (1: mov pins [2] (3cyc) + jmp (1cyc) / 0: nop [3] (4cyc)) + jmp !osre (1cyc) = 計10cyc
+; - ワード最終ビット (31ビット目):
+;     jmp !osre が不成立でフォールスルー (1cyc)
+;     jmp y--, word_loop (1cyc)
+;     pull block (1cyc)
+;     計12サイクル (10 -> 12サイクルへ拡大)。この2サイクルの拡大はRX側の wait 命令により
+;     次の境界エッジ到達まで待機することで安全に吸収される。
+.wrap_target
+idle:
+    set pins, 1             ; 1: 待機時は確実にHigh (3.3V) を能動出力
+    pull block              ; 2: パケットヘッダ長ワード取得 (Y = 総データワード数 - 1)
+    mov y, osr              ; 3: レジスタYへワードカウンタを格納
+
+word_loop:
+    pull block              ; 4: 送信データワード取得 (32bit)
+
+bit_loop:
+    mov pins, !pins         ; 5: 境界エッジ反転 (自ピン読み戻し反転) [1cyc]
+    out x, 1                ; 6: OSRから1ビット取得 [1cyc]
+    jmp !x, is_zero     [2] ; 7: 0なら前半中央反転スキップ (ディレイ2 -> 前半計5cyc)
+
+    ; --- ビット1: 中央反転 (5cyc境界で厳密反転) ---
+    mov pins, !pins     [2] ; 8: 中央反転 (ディレイ2 -> 8cyc目まで)
+    jmp check_bit           ; 9: 9cyc目
+
+is_zero:
+    ; --- ビット0: レベル維持 ---
+    nop                 [3] ; 10: 前半レベル維持 (ディレイ3 -> 8cyc目まで)
+
+check_bit:
+    jmp !osre, bit_loop     ; 11: OSRに残りがあれば次ビットへ [1cyc] (通常計10cyc, 最終ビットは12cyc)
+    jmp y--, word_loop      ; 12: パケット内に次ワードがあれば取得へ (1cyc)
+
+    ; --- 全パケット送出完了 (EOP) ---
+    set pins, 1             ; 13: 最終ビット完了: 即座にHigh能動出力
+    irq set 0               ; 14: パケット物理送出の完全終了をCPU/DMAへ通知
+.wrap
+
+
+.program bmc_mid10_rx
+; --- RX: SOP立下り起動・10cyc対応BMC復号器 (18命令) ---
+; Autopush: 有効 (32bit)
+;
+; =============================================================================
+; 【Mid10 RX サンプリングタイミング設計 & サイクル詳細テーブル (10 cycles/bit)】
+; TX仕様: 境界反転 cycle 0, 中央反転 (ビット1) cycle 5, 次境界 cycle 10 (ワード末尾は cycle 12)
+; 設計目標: 中央反転(cycle 5)の後、次境界(cycle 10)の前である【Cycle 7】で厳密サンプリング
+;           マージン: 中央反転から +2 サイクル、次境界まで -3 サイクル
+;           (非対称: 10cyc/bitは4で割り切れないため厳密な中点(7.5)が整数にならない。次境界側により多くのマージン(-3)を残す設計とした)
+; =============================================================================
+;
+; 全分岐における wait 成立(cycle 0)からのサイクル詳細表:
+; +-------------------------------+---------+---------+------------+--------------------+----------------+-----------------+
+; | 分岐 (Branch)                 | Cycle 0 | Cycle 1 | Cycle 2..6 | Cycle 7 (Sampling) | Cycle 8        | Cycle 9 (Wait)  |
+; +-------------------------------+---------+---------+------------+--------------------+----------------+-----------------+
+; | 初期SOP (wait_sop -> was_low) | wait 0  | nop [0] | nop [4]    | jmp pin (sample)   | in null / in x | wait 1 / wait 0 |
+; | 定常 Low->Bit 0 (got_0_low)   | wait 1  | jmp high| nop [4]    | jmp pin (sample)   | in null, 1     | wait 0 pin 0    |
+; | 定常 Low->Bit 1 (got_1_low)   | wait 0  | jmp low | nop [4]    | jmp pin (sample)   | in x, 1        | wait 0 pin 0    |
+; | 定常 High->Bit 0 (got_0_high) | wait 0  | jmp low | nop [4]    | jmp pin (sample)   | in null, 1     | wait 1 pin 0    |
+; | 定常 High->Bit 1 (got_1_high) | wait 1  | jmp high| nop [4]    | jmp pin (sample)   | in x, 1        | wait 1 pin 0    |
+; +-------------------------------+---------+---------+------------+--------------------+----------------+-----------------+
+; ※ 初期SOPの nop [0] は定常時の jmp was_xxx (1cyc) とサイクル数を完全に一致させ、全分岐で Cycle 7 サンプリングを実現する。
+.wrap_target
+wait_sop:
+    wait 0 pin 0        ; 1: アイドル(High)からの立下りエッジ(SOP)待機 [Cycle 0]
+    nop                 ; 2: 1サイクル消費 (定常時のjmp遅延と同一化しCycle 7サンプリングを保証)
+
+was_low:
+    nop             [4] ; 3: 5サイクルディレイ (Cycle 2..6)
+    jmp pin, got_1_from_low ; 4: 【Cycle 7 サンプリング】中央反転してHighならビット1
+got_0_from_low:
+    in null, 1          ; 5: ビット0 (ISRへ0シフト) [Cycle 8]
+    wait 1 pin 0        ; 6: 次の境界エッジ (立上がり) 待機 [Cycle 9〜]
+    jmp was_high        ; 7: 次状態へ (1サイクル消費)
+
+got_1_from_low:
+    in x, 1             ; 8: ビット1 (ISRへ1シフト) [Cycle 8]
+    wait 0 pin 0        ; 9: 次の境界エッジ (立下り) 待機 [Cycle 9〜]
+    jmp was_low         ; 10: 次状態へ (1サイクル消費)
+
+was_high:
+    nop             [4] ; 11: 5サイクルディレイ (Cycle 2..6)
+    jmp pin, got_0_from_high ; 12: 【Cycle 7 サンプリング】High維持ならビット0
+got_1_from_high:
+    in x, 1             ; 13: ビット1 (ISRへ1シフト) [Cycle 8]
+    wait 1 pin 0        ; 14: 次の境界エッジ (立上がり) 待機 [Cycle 9〜]
+    jmp was_high        ; 15: 次状態へ (1サイクル消費)
+
+got_0_from_high:
+    in null, 1          ; 16: ビット0 (ISRへ0シフト) [Cycle 8]
+    wait 0 pin 0        ; 17: 次の境界エッジ (立下り) 待機 [Cycle 9〜]
+    jmp was_low         ; 18: 次状態へ (1サイクル消費)
+.wrap
+
+% c-sdk {
+static inline void bmc_mid10_tx_program_init(PIO pio, uint sm, uint offset, uint pin, float clkdiv) {
+    // 1. SIOでHigh出力を保持
+    gpio_put(pin, 1);
+    gpio_set_dir(pin, GPIO_OUT);
+    gpio_set_function(pin, GPIO_FUNC_SIO);
+    gpio_set_slew_rate(pin, GPIO_SLEW_RATE_SLOW);
+    gpio_set_drive_strength(pin, GPIO_DRIVE_STRENGTH_4MA);
+    gpio_set_input_enabled(pin, true);
+
+    // 2. SM設定
+    pio_sm_config c = bmc_mid10_tx_program_get_default_config(offset);
+    sm_config_set_set_pins(&c, pin, 1);
+    sm_config_set_out_pins(&c, pin, 1);
+    sm_config_set_in_pins(&c, pin);
+    sm_config_set_out_shift(&c, false, false, 32);
+    sm_config_set_clkdiv(&c, clkdiv);
+
+    pio_sm_init(pio, sm, offset, &c);
+
+    // 3. ラッチHigh / 方向OUT準備してからPIOへ切替
+    pio_sm_set_pins_with_mask(pio, sm, 1u << pin, 1u << pin);
+    pio_sm_set_pindirs_with_mask(pio, sm, 1u << pin, 1u << pin);
+    gpio_set_function(pin, (pio == pio0) ? GPIO_FUNC_PIO0 : GPIO_FUNC_PIO1);
+}
+
+static inline void bmc_mid10_rx_program_init(PIO pio, uint sm, uint offset, uint pin, float clkdiv) {
+    gpio_init(pin);
+    gpio_set_dir(pin, GPIO_IN);
+    gpio_pull_down(pin);
+    gpio_set_input_hysteresis_enabled(pin, true);
+
+    pio_gpio_init(pio, pin);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, false);
+
+    pio_sm_config c = bmc_mid10_rx_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin);
+    sm_config_set_jmp_pin(&c, pin);
+    sm_config_set_in_shift(&c, false, true, 32);
+    sm_config_set_clkdiv(&c, clkdiv);
+
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_exec(pio, sm, pio_encode_mov_not(pio_x, pio_null));
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}
