@@ -1,40 +1,44 @@
 # PicoPIO-IPPON
 
+**English** | [日本語](README.ja.md)
+
 **One-wire point-to-point link for Raspberry Pi Pico 2 (RP2350) using PIO and Biphase Mark Code (differential Manchester), with firmware transfer (OTA) on top.**
 
-RP2350 の PIO で差動マンチェスタ（BMC）を送受信する、**線 1 本（+ GND）の P2P リンク**の PoC です。外付け部品なしのジャンパ直結で、ハードウェア UART の上限（9.375 Mbps）を超える 12.5〜18.75 Mbps を実機で出しています。リンクの上に、数百 KB のファームウェアを flash のステージング領域へ転送する OTA 層も載せています。
+A proof of concept of a **single-wire (plus GND) point-to-point link** that sends and receives Biphase Mark Code (BMC, differential Manchester) with the RP2350's PIO. With a plain jumper wire and no external components, it reaches 12.5–18.75 Mbps on real hardware, beyond the hardware UART's ceiling of 9.375 Mbps. On top of the link sits an OTA layer that transfers a firmware image of a few hundred KB into a flash staging area.
 
-> 状態: **PoC（概念実証）**。計測はすべて Pico 2 W 1 枚の GP0↔GP1 ループバックで行ったもので、別の基板どうし（独立したクロック）での試験はまだです。
+"IPPON" (一本) is Japanese for "one line".
 
-## 実測値（Pico 2 W 1 枚、GP0↔GP1 直結、sysclk 150 MHz）
+> Status: **proof of concept**. All measurements were taken on a single Pico 2 W with GP0 looped back to GP1. Tests between separate boards (with independent clocks) have not been done yet.
 
-連続送信（Burst）のアプリ実効スループット。全モードでエラー・欠落・リング追越しは 0。
+## Measured results (one Pico 2 W, GP0↔GP1 jumper, sysclk 150 MHz)
 
-| モード | 線路レート | 実効スループット |
+Application-level throughput in continuous (burst) mode. Every mode ran with zero errors, zero drops and zero ring overruns.
+
+| Mode | Line rate | Throughput |
 |---|---|---|
-| UART（PL011、参考） | 9.375 Mbps | 672.4 KiB/s |
+| UART (PL011, for reference) | 9.375 Mbps | 672.4 KiB/s |
 | BMC | 9.375 Mbps | 835.4 KiB/s |
 | BMC | 12.5 Mbps | 1,107.0 KiB/s |
 | BMC | 15 Mbps | 1,320.0 KiB/s |
-| BMC（実験扱い、TX パッド FAST + 8 mA） | 18.75 Mbps | 1,634.9 KiB/s |
+| BMC (experimental, TX pad FAST slew + 8 mA) | 18.75 Mbps | 1,634.9 KiB/s |
 
-- 停止待ち（1 フレーム送って応答を待つ）の往復時間は、18.75 Mbps で 41.3 µs。
-- **OTA**: 384 KB のイメージを 64 KB 窓で送り、flash に書いて読み戻し検証まで、1.80 s（18.75 Mbps）〜2.00 s（9.375 Mbps）。CRC 一致、再送 0。1 枚の基板では受信側の flash 書き込み中に送信側も止まるため、リンクと書き込みは重なっていません。
-- **flash（W25Q32）**: 4 KB 消去 32.2 ms、64 KB 消去 88.5 ms、4 KB 書き込み 7.23 ms、256 B 書き込み 0.63 ms（書き込み済み領域での計測）。
+- Round-trip time in stop-and-wait mode (send one frame, wait for it to be received): 41.3 µs at 18.75 Mbps.
+- **OTA**: sending a 384 KB image in 64 KB windows, writing it to flash and verifying it by read-back takes 1.80 s (18.75 Mbps) to 2.00 s (9.375 Mbps). CRC matched, zero retransmissions. On a single board the sender also stalls while the receiver writes flash, so link time and flash writes do not overlap.
+- **Flash (W25Q32)**: 4 KB erase 32.2 ms, 64 KB erase 88.5 ms, 4 KB program 7.23 ms, 256 B program 0.63 ms (measured on previously written regions).
 
-## しくみ
+## How it works
 
-- **線上フォーマット**: プリアンブル `0xAAAA` + 同期語 `0x93C7` + [LEN][TYPE][SEQ][RSV][PAYLOAD 1〜128 B][CRC16] + パリティパディング（フレーム終端を High にそろえる）+ ポストアンブル 4 B。
-- **受信**: PIO が境界エッジに追従してビットを復号し、DMA で 16 KB のリングへ流す。CPU はビット単位で同期語を探すので、**ビット位相がずれても次のフレームで自力回復**する。
-- **送信**: PIO の SM を常駐させ、ダブルバッファで次のフレームを符号化しながら送る（線路使用率 95〜99%）。
-- 1 ビットあたり 16 / 12 / 10 / 8 PIO サイクルの 4 種類の PIO プログラム（`bmc/`）。TX は pio0、RX は pio1。
-- **OTA**（`ota/`）: 64 KB 窓 × 2 面の SRAM ダブルバッファ、XNOR 方式の欠け問い合わせと再送、窓ごとの XIP 読み戻し CRC32、最後にイメージ全体の CRC32。書き込み先はステージング領域だけで、**書いたイメージへの切り替えや再起動はしない**。
+- **Wire format**: preamble `0xAAAA` + sync word `0x93C7` + [LEN][TYPE][SEQ][RSV][PAYLOAD 1–128 B][CRC16] + parity padding (so that every frame ends at the High level) + 4-byte postamble.
+- **Receive**: the PIO follows boundary edges to decode bits, and DMA streams them into a 16 KB ring. The CPU searches for the sync word bit by bit, so **the receiver recovers on the next frame even after a bit-phase slip**.
+- **Transmit**: the PIO state machine stays resident, and a double buffer encodes the next frame while the current one is on the wire (95–99% line utilization).
+- Four PIO programs for 16 / 12 / 10 / 8 PIO cycles per bit (`bmc/`). TX runs on pio0 and RX on pio1.
+- **OTA** (`ota/`): two 64 KB SRAM windows (double buffer), XNOR-style query for missing packets and retransmission, a per-window XIP read-back CRC32, and a final CRC32 over the whole image. It writes only to the staging area and **never switches to or boots the written image**.
 
-詳しい設計は `docs/`（Typst と PDF）にあります。
+Detailed design documents are in `docs/` (Typst sources and PDFs, in Japanese).
 
-## ビルド
+## Build
 
-Pico SDK 2.2.0、`arm-none-eabi-gcc`、CMake、Ninja。
+Pico SDK 2.2.0, `arm-none-eabi-gcc`, CMake and Ninja.
 
 ```sh
 mkdir build && cd build
@@ -42,38 +46,38 @@ cmake -DPICO_SDK_PATH=$PICO_SDK_PATH -DPICO_BOARD=pico2_w -GNinja ..
 ninja
 ```
 
-できるファームウェア:
+Firmware images:
 
-| ファイル | 内容 |
+| File | Contents |
 |---|---|
-| `poc_benchmark.uf2` | BMC / UART の計測（全モードの自動スイープ、単発送信、診断ダンプ） |
-| `poc_ota_bench.uf2` | BMC 上の OTA 転送の計測（384 KB） |
-| `poc_flash_bench.uf2` | flash の消去・書き込み速度の計測（ステージング領域のみ） |
-| `poc_bmc_loopback.uf2` / `poc_uart_loopback.uf2` | 単体のループバック |
+| `poc_benchmark.uf2` | BMC / UART benchmark (automatic sweep over all modes, single-shot send, diagnostic dump) |
+| `poc_ota_bench.uf2` | OTA transfer over BMC (384 KB) |
+| `poc_flash_bench.uf2` | Flash erase and program speed (staging area only) |
+| `poc_bmc_loopback.uf2` / `poc_uart_loopback.uf2` | Standalone loopback tests |
 
-起動ログの先頭に `[BUILD] <UTC> | git: <sha> | src-sha256: <hash>` が出るので、どのソースから作ったバイナリか確認できます。
+Every image prints `[BUILD] <UTC> | git: <sha> | src-sha256: <hash>` at the top of its boot log, so you can tell which source a binary was built from.
 
-**配線**: GP0（TX）と GP1（RX）をジャンパ線 1 本でつなぐだけです。USB シリアル（115200）でキー操作します。操作方法は `docs/benchmark_guide.md` を見てください。
+**Wiring**: connect GP0 (TX) to GP1 (RX) with a single jumper wire. Control it over USB serial (115200). See `docs/benchmark_guide.md` for the key commands.
 
-## ホストテスト
+## Host tests
 
-パケット、受信フレームの抽出（ビット位相 32 通り × 長さ 1〜128）、リング、DMA カウンタ、flash 領域のガード、OTA 転送（パケット損失 0 / 1 / 10%）のテストがあります。
+Tests cover packets, receive-frame extraction (all 32 bit phases × lengths 1–128), the ring buffer, the DMA counter, flash region guards, and OTA transfer (0 / 1 / 10% packet loss).
 
 ```sh
 cd tests
 gcc -std=c11 -Wall -Wextra -I.. -I../common test_packet.c ../common/packet.c ../common/crc16.c -o /tmp/test_packet && /tmp/test_packet
 ```
 
-ほかのテストも同様です（`tests/CMakeLists.txt` にも登録済み）。
+The other tests build the same way (they are also listed in `tests/CMakeLists.txt`).
 
-## 未検証・制約
+## Not yet verified / limitations
 
-- 別の基板どうし（独立したクロック、長い配線）での試験は未実施。ループバックでは送受信が同じクロックを使うので、位相条件が理想的です。
-- OTA の応答（READY や欠けの一覧）は、ループバックでは線を通さず SRAM 上のキューで返しています。2 台構成の戻り経路（同じ線での半二重か、2 本目の線か）は未設計です。
-- 18.75 Mbps は TX パッドを FAST スルー + 8 mA にしたときだけ成立します。
+- No tests between separate boards (independent clocks, long wires) yet. In loopback, transmitter and receiver share one clock, so phase conditions are ideal.
+- In loopback, OTA replies (READY, lists of missing packets) return to the sender through an in-memory queue instead of the wire. The return path for a two-board setup (half duplex on the same wire, or a second wire) is not designed yet.
+- 18.75 Mbps works only with the TX pad set to FAST slew and 8 mA drive.
 
-## ライセンス
+## License
 
-[GPL-3.0-or-later](LICENSE)。
+[GPL-3.0-or-later](LICENSE).
 
-`pico_sdk_import.cmake` は Raspberry Pi の Pico SDK からのコピーで、BSD-3-Clause です。
+`pico_sdk_import.cmake` is copied from the Raspberry Pi Pico SDK and is licensed under BSD-3-Clause.
