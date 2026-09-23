@@ -39,18 +39,16 @@ static bool tx_send_pkt(ota_sender_t *tx, const void *payload, uint8_t len) {
     return ok;
 }
 
-static void setup_window(ota_sender_t *tx, uint16_t win_idx) {
+static void calc_window_info(const ota_sender_t *tx, uint16_t win_idx, uint32_t *out_bytes, uint32_t *out_crc32) {
     uint32_t offset = (uint32_t)win_idx * OTA_WINDOW_SIZE;
     uint32_t remaining = (tx->config.total_size > offset) ? (tx->config.total_size - offset) : 0;
-    tx->current_win_bytes = (remaining > OTA_WINDOW_SIZE) ? OTA_WINDOW_SIZE : remaining;
-    tx->total_chunks_in_win = (uint16_t)((tx->current_win_bytes + OTA_CHUNK_DATA_SIZE - 1) / OTA_CHUNK_DATA_SIZE);
-    tx->current_chunk_idx = 0;
+    uint32_t win_bytes = (remaining > OTA_WINDOW_SIZE) ? OTA_WINDOW_SIZE : remaining;
+    if (out_bytes) *out_bytes = win_bytes;
 
-    /* Compute CRC32 of this window data using reader */
     uint32_t win_crc = OTA_CRC32_INIT;
     uint8_t temp[OTA_CHUNK_DATA_SIZE];
     uint32_t cur = offset;
-    uint32_t left = tx->current_win_bytes;
+    uint32_t left = win_bytes;
     while (left > 0) {
         size_t n = (left > sizeof(temp)) ? sizeof(temp) : left;
         if (tx->config.data_reader) {
@@ -60,7 +58,13 @@ static void setup_window(ota_sender_t *tx, uint16_t win_idx) {
         cur += n;
         left -= n;
     }
-    tx->current_win_crc32 = win_crc ^ 0xFFFFFFFFu;
+    if (out_crc32) *out_crc32 = win_crc ^ 0xFFFFFFFFu;
+}
+
+static void setup_window(ota_sender_t *tx, uint16_t win_idx) {
+    calc_window_info(tx, win_idx, &tx->current_win_bytes, &tx->current_win_crc32);
+    tx->total_chunks_in_win = (uint16_t)((tx->current_win_bytes + OTA_CHUNK_DATA_SIZE - 1) / OTA_CHUNK_DATA_SIZE);
+    tx->current_chunk_idx = 0;
     tx->t_win_start_us = get_time_us();
 }
 
@@ -162,6 +166,13 @@ bool BMC_SRAM_FUNC(ota_sender_handle_response)(ota_sender_t *tx, const uint8_t *
                 tx->stats.max_window_us = win_dur;
             }
 
+            bool queried_win_completed = false;
+            if (tx->send_win_idx <= ready->win_idx) {
+                tx->credits--;
+                tx->send_win_idx = ready->win_idx + 1;
+                queried_win_completed = true;
+            }
+
             if (tx->commit_win_idx == tx->total_windows) {
                 /* All windows committed to flash! Request final full verification */
                 ota_finalize_pkt_t finalize_pkt = {
@@ -173,12 +184,17 @@ bool BMC_SRAM_FUNC(ota_sender_handle_response)(ota_sender_t *tx, const uint8_t *
                 tx->state_enter_us = get_time_us();
                 tx->retries = 0;
                 tx_send_pkt(tx, &finalize_pkt, sizeof(finalize_pkt));
-            } else if (tx->state == OTA_TX_STATE_WAIT_READY) {
-                /* Start next window now that credit was granted */
-                if (tx->send_win_idx < tx->total_windows) {
+            } else if (tx->state == OTA_TX_STATE_WAIT_READY || queried_win_completed) {
+                /* Start next window now that credit was granted, or wait if out of credits */
+                if (tx->send_win_idx < tx->total_windows && tx->credits > 0) {
                     setup_window(tx, tx->send_win_idx);
                     tx->state = OTA_TX_STATE_SEND_WINDOW;
                     tx->state_enter_us = get_time_us();
+                    tx->retries = 0;
+                } else if (tx->send_win_idx < tx->total_windows) {
+                    tx->state = OTA_TX_STATE_WAIT_READY;
+                    tx->state_enter_us = get_time_us();
+                    tx->retries = 0;
                 }
             }
             return true;
@@ -384,12 +400,14 @@ bool BMC_SRAM_FUNC(ota_sender_step)(ota_sender_t *tx) {
                     tx->state = OTA_TX_STATE_FAILED;
                     return false;
                 }
+                uint32_t q_bytes = 0, q_crc32 = 0;
+                calc_window_info(tx, tx->commit_win_idx, &q_bytes, &q_crc32);
                 ota_query_pkt_t q = {
                     .pkt_type = OTA_PKT_TYPE_QUERY,
                     .win_idx = (uint8_t)tx->commit_win_idx,
                     .reserved = 0,
-                    .win_crc32 = tx->current_win_crc32,
-                    .win_bytes = tx->current_win_bytes
+                    .win_crc32 = q_crc32,
+                    .win_bytes = q_bytes
                 };
                 tx_send_pkt(tx, &q, sizeof(q));
                 tx->stats.queries_sent++;

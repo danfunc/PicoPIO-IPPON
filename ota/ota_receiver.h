@@ -49,6 +49,7 @@ typedef struct {
     uint32_t rx_queries;
     uint32_t flash_retries;
     uint32_t windows_flashed;
+    uint32_t last_ready_resends;   /* NIPPON: count of resends from last_ready cache */
     uint64_t flash_erase_us;
     uint64_t flash_program_us;
     uint64_t flash_verify_us;

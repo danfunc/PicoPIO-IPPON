@@ -1,0 +1,10 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# ルート公開ターゲット: //:core
+alias(
+    name = "core",
+    actual = "//common:core",
+    visibility = ["//visibility:public"],
+)

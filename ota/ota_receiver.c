@@ -162,6 +162,7 @@ bool BMC_SRAM_FUNC(ota_receiver_process_packet)(ota_receiver_t *rx, const uint8_
                  * スロットがFREE化されて中身の手がかりを失っていても、直近送出READYの
                  * キャッシュと一致すればそれを再送する。一致しなければ本当に未知の窓。 */
                 if (rx->has_last_ready && rx->last_ready.win_idx == pkt->win_idx) {
+                    rx->stats.last_ready_resends++;
                     rx_send_response(rx, &rx->last_ready, sizeof(rx->last_ready));
                     return true;
                 }
@@ -173,6 +174,22 @@ bool BMC_SRAM_FUNC(ota_receiver_process_packet)(ota_receiver_t *rx, const uint8_
                 resp.total_chunks = (uint16_t)((pkt->win_bytes + OTA_CHUNK_DATA_SIZE - 1) / OTA_CHUNK_DATA_SIZE);
                 resp.missing_count = resp.total_chunks;
                 resp.bitmap_bytes = (resp.total_chunks + 7) / 8;
+                rx_send_response(rx, &resp, 8 + resp.bitmap_bytes);
+                return true;
+            }
+
+            if (slot->state == OTA_SLOT_READY_TO_FLASH) {
+                /* Window is already complete and waiting for or undergoing flashing.
+                 * Do NOT overwrite expected_crc32 or win_bytes!
+                 * Respond that 0 chunks are missing. */
+                ota_query_resp_pkt_t resp;
+                memset(&resp, 0, sizeof(resp));
+                resp.pkt_type = OTA_PKT_TYPE_QUERY_RESP;
+                resp.win_idx = slot->win_idx;
+                resp.missing_count = 0;
+                resp.total_chunks = slot->total_chunks;
+                resp.bitmap_bytes = (slot->total_chunks + 7) / 8;
+                memcpy(resp.bitmap, slot->bitmap, resp.bitmap_bytes);
                 rx_send_response(rx, &resp, 8 + resp.bitmap_bytes);
                 return true;
             }

@@ -1,0 +1,35 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# OTA コアプロトコル・送受信ステートマシンライブラリ (//ota:ota_core)
+# ホスト環境では POSIX <time.h> を用い pico-sdk 非依存でビルド・テスト可能。
+# RP2040 / RP2350 ターゲット選択時は自動的に pico-sdk の pico_time および pico_stdlib をリンクする。
+cc_library(
+    name = "ota_core",
+    srcs = [
+        "ota_protocol.c",
+        "ota_receiver.c",
+        "ota_sender.c",
+    ],
+    hdrs = [
+        "ota_protocol.h",
+        "ota_receiver.h",
+        "ota_sender.h",
+    ],
+    includes = ["."],
+    deps = [
+        "//common:core",
+    ] + select({
+        "@pico-sdk//bazel/constraint:rp2040": [
+            "@pico-sdk//src/common/pico_time",
+            "@pico-sdk//src/rp2_common/pico_stdlib",
+        ],
+        "@pico-sdk//bazel/constraint:rp2350": [
+            "@pico-sdk//src/common/pico_time",
+            "@pico-sdk//src/rp2_common/pico_stdlib",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)

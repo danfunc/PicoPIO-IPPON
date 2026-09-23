@@ -1,0 +1,42 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# コアBMCパケット・CRC16・リングカーソルライブラリ (//core の本体)
+cc_library(
+    name = "core",
+    srcs = [
+        "crc16.c",
+        "packet.c",
+        "ring_cursor.c",
+    ],
+    hdrs = [
+        "crc16.h",
+        "packet.h",
+        "ring_cursor.h",
+        "sram_attrs.h",
+    ],
+    includes = ["."],
+    deps = select({
+        "@pico-sdk//bazel/constraint:rp2040": [
+            "@pico-sdk//src/rp2_common:pico_platform",
+        ],
+        "@pico-sdk//bazel/constraint:rp2350": [
+            "@pico-sdk//src/rp2_common:pico_platform",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+# 共通ベンチマークライブラリ
+cc_library(
+    name = "benchmark_common",
+    srcs = ["benchmark_common.c"],
+    hdrs = ["benchmark_common.h"],
+    includes = ["."],
+    deps = [
+        ":core",
+    ],
+    visibility = ["//visibility:public"],
+)

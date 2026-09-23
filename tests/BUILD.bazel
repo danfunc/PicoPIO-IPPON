@@ -1,0 +1,67 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# ベアメタル(os:none)向けビルド時はホストテストを自動スキップする
+_HOST_ONLY = select({
+    "@platforms//os:none": ["@platforms//:incompatible"],
+    "//conditions:default": [],
+})
+
+cc_test(
+    name = "test_packet",
+    srcs = ["test_packet.c"],
+    copts = ["-std=c11"],
+    target_compatible_with = _HOST_ONLY,
+    deps = ["//common:core"],
+    size = "small",
+)
+
+cc_test(
+    name = "test_ring",
+    srcs = ["test_ring.c"],
+    copts = ["-std=c11"],
+    target_compatible_with = _HOST_ONLY,
+    deps = ["//common:core"],
+    size = "small",
+)
+
+cc_test(
+    name = "test_rx_extract",
+    srcs = ["test_rx_extract.c"],
+    copts = ["-std=c11"],
+    target_compatible_with = _HOST_ONLY,
+    deps = ["//common:core"],
+    size = "small",
+)
+
+cc_test(
+    name = "test_dma_counter",
+    srcs = ["test_dma_counter.c"],
+    copts = ["-std=c11"],
+    target_compatible_with = _HOST_ONLY,
+    deps = ["//common:core"],
+    size = "small",
+)
+
+cc_test(
+    name = "test_flash_bench",
+    srcs = ["test_flash_bench.c"],
+    copts = ["-std=c11"],
+    target_compatible_with = _HOST_ONLY,
+    deps = ["//flash:flash_utils"],
+    size = "small",
+)
+
+cc_test(
+    name = "test_ota_transfer",
+    srcs = ["test_ota_transfer.c"],
+    copts = ["-std=c11"],
+    target_compatible_with = _HOST_ONLY,
+    deps = [
+        "//common:core",
+        "//flash:flash_utils",
+        "//ota:ota_core",
+    ],
+    size = "small",
+)

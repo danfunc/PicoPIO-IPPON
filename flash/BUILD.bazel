@@ -1,0 +1,15 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "flash_utils",
+    srcs = ["flash_utils.c"],
+    hdrs = [
+        "flash_utils.h",
+        "flash_map.h",
+        "flash_bench.h",
+    ],
+    includes = ["."],
+    visibility = ["//visibility:public"],
+)
