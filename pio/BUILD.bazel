@@ -1,0 +1,15 @@
+load("@pico-sdk//bazel:defs.bzl", "pico_generate_pio_header")
+
+package(default_visibility = ["//visibility:public"])
+
+# BMC PIO プログラムヘッダ生成ターゲット (//pio:bmc_programs)
+pico_generate_pio_header(
+    name = "bmc_programs",
+    srcs = [
+        "//bmc:bmc_p2p.pio",
+        "//bmc:bmc_p2p_fast.pio",
+        "//bmc:bmc_p2p_mid10.pio",
+        "//bmc:bmc_p2p_mid12.pio",
+    ],
+    visibility = ["//visibility:public"],
+)

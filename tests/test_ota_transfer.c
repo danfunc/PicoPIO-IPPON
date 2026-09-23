@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <string.h>
 #include <assert.h>
+#include <time.h>
+#include <unistd.h>
 
 #include "ota/ota_protocol.h"
 #include "ota/ota_receiver.h"
@@ -114,6 +116,12 @@ typedef struct {
     uint32_t dup_pct;        /* 0..100 */
     uint32_t dropped_count;
     uint32_t duplicated_count;
+    /* NIPPON: 線Bの応答(受け手->送り手)喪失シミュレーション。
+     * reverse_drop_remaining > 0 の間、REJECT対象のパケット種別(READY/QUERY_RESP)を
+     * 決定的に破棄する(確率的ではなく回数固定なので、送り手側の再送到達を
+     * MAX_TIMEOUT_RETRIES以内で確定的に検証できる)。 */
+    int      reverse_drop_remaining;
+    uint32_t reverse_dropped_count;
 } mock_link_t;
 
 static uint32_t mock_prng_next(uint32_t *st) {
@@ -172,6 +180,18 @@ static bool link_sender_recv(void *ctx, uint8_t *out_bmc_type, uint8_t *out_seq,
 static bool link_receiver_send(void *ctx, uint8_t bmc_type, uint8_t seq,
                                const uint8_t *payload, uint8_t len) {
     mock_link_t *link = (mock_link_t *)ctx;
+
+    /* NIPPON: 線B(受け手->送り手)応答喪失シミュレーション。READYまたはQUERY_RESPを
+     * 決定的に固定回数だけ破棄し、送り手のWAIT_READY再問い合わせ(commit_win_idx宛の
+     * QUERY再送)と、受け手のhas_last_ready/last_readyキャッシュからの再送が実際に
+     * 動作することを検証する。 */
+    if (link->reverse_drop_remaining > 0 &&
+        (payload[0] == OTA_PKT_TYPE_READY || payload[0] == OTA_PKT_TYPE_QUERY_RESP)) {
+        link->reverse_drop_remaining--;
+        link->reverse_dropped_count++;
+        return true; /* Dropped silently */
+    }
+
     mock_pkt_t pkt;
     pkt.bmc_type = bmc_type;
     pkt.seq = seq;
@@ -224,6 +244,7 @@ static bool buffer_data_reader(void *ctx, uint32_t offset, uint8_t *dst, size_t 
  */
 static bool run_full_transfer(size_t image_size, uint32_t seed, uint32_t loss_pct,
                               uint32_t dup_pct, int corrupt_win, int corrupt_count,
+                              int reverse_drop_count,
                               ota_tx_stats_t *out_tx_stats, ota_rx_stats_t *out_rx_stats) {
     uint8_t *source_image = (uint8_t *)malloc(image_size);
     assert(source_image != NULL);
@@ -252,6 +273,7 @@ static bool run_full_transfer(size_t image_size, uint32_t seed, uint32_t loss_pc
     link.prng_state = seed ^ 0xA5A5A5A5u;
     link.loss_pct = loss_pct;
     link.dup_pct = dup_pct;
+    link.reverse_drop_remaining = reverse_drop_count;
 
     /* Initialize Receiver */
     ota_rx_config_t rx_cfg = {
@@ -303,12 +325,18 @@ static bool run_full_transfer(size_t image_size, uint32_t seed, uint32_t loss_pc
         /* Step Receiver Network Input */
         uint8_t rx_bmc_type = 0, rx_seq = 0, rx_len = 0;
         uint8_t rx_buf[128];
+        bool rx_has_pkt = false;
         while (rx_cfg.link_ops.recv_packet(rx_cfg.link_ctx, &rx_bmc_type, &rx_seq, rx_buf, &rx_len)) {
             ota_receiver_process_packet(&rx, rx_buf, rx_len);
+            rx_has_pkt = true;
         }
 
         /* Step Receiver Flash Operations */
-        ota_receiver_step_flash(&rx);
+        bool flashed = ota_receiver_step_flash(&rx);
+
+        if (!flashed && !rx_has_pkt) {
+            usleep(200); /* Prevent burning iterations while waiting for wall-clock timeouts */
+        }
 
         /* Check Completion */
         if (ota_sender_is_complete(&tx) && ota_receiver_is_complete(&rx)) {
@@ -350,7 +378,7 @@ static void test_384kb_loss_0(void) {
     printf("[TEST 1] 384KB transfer with 0%% packet loss (Happy Path)...\n");
     ota_tx_stats_t tx_st;
     ota_rx_stats_t rx_st;
-    bool ok = run_full_transfer(384 * 1024, 0x11223344, 0, 0, -1, 0, &tx_st, &rx_st);
+    bool ok = run_full_transfer(384 * 1024, 0x11223344, 0, 0, -1, 0, 0, &tx_st, &rx_st);
     assert(ok);
     assert(tx_st.windows_completed == 6);
     assert(tx_st.retransmit_packets == 0);
@@ -365,7 +393,7 @@ static void test_384kb_loss_1(void) {
     printf("[TEST 2] 384KB transfer with 1%% packet loss (XNOR missing retransmission)...\n");
     ota_tx_stats_t tx_st;
     ota_rx_stats_t rx_st;
-    bool ok = run_full_transfer(384 * 1024, 0x55667788, 1, 0, -1, 0, &tx_st, &rx_st);
+    bool ok = run_full_transfer(384 * 1024, 0x55667788, 1, 0, -1, 0, 0, &tx_st, &rx_st);
     assert(ok);
     assert(tx_st.windows_completed == 6);
     assert(tx_st.retransmit_packets > 0);
@@ -379,7 +407,7 @@ static void test_384kb_loss_10(void) {
     printf("[TEST 3] 384KB transfer with 10%% heavy packet loss...\n");
     ota_tx_stats_t tx_st;
     ota_rx_stats_t rx_st;
-    bool ok = run_full_transfer(384 * 1024, 0x99AABBCC, 10, 0, -1, 0, &tx_st, &rx_st);
+    bool ok = run_full_transfer(384 * 1024, 0x99AABBCC, 10, 0, -1, 0, 0, &tx_st, &rx_st);
     assert(ok);
     assert(tx_st.windows_completed == 6);
     assert(tx_st.retransmit_packets > 100);
@@ -393,7 +421,7 @@ static void test_fractional_size_300kb(void) {
     printf("[TEST 4] Fractional image size (300KB = 4 full windows + 1 partial window)...\n");
     ota_tx_stats_t tx_st;
     ota_rx_stats_t rx_st;
-    bool ok = run_full_transfer(300 * 1024, 0xCAFEBABE, 1, 0, -1, 0, &tx_st, &rx_st);
+    bool ok = run_full_transfer(300 * 1024, 0xCAFEBABE, 1, 0, -1, 0, 0, &tx_st, &rx_st);
     assert(ok);
     assert(tx_st.windows_completed == 5);
     assert(rx_st.windows_flashed == 5);
@@ -405,7 +433,7 @@ static void test_duplicate_packets(void) {
     printf("[TEST 5] Packet duplication tolerance (5%% duplicate packet arrival)...\n");
     ota_tx_stats_t tx_st;
     ota_rx_stats_t rx_st;
-    bool ok = run_full_transfer(128 * 1024, 0x12344321, 0, 5, -1, 0, &tx_st, &rx_st);
+    bool ok = run_full_transfer(128 * 1024, 0x12344321, 0, 5, -1, 0, 0, &tx_st, &rx_st);
     assert(ok);
     assert(rx_st.rx_chunks_duplicate > 0);
     assert(tx_st.windows_completed == 2);
@@ -419,7 +447,7 @@ static void test_flash_readback_failure_recovery(void) {
     ota_tx_stats_t tx_st;
     ota_rx_stats_t rx_st;
     /* Deliberately corrupt window 2 readback once, then succeed on retry */
-    bool ok = run_full_transfer(256 * 1024, 0xFEEDFACE, 0, 0, 2, 1, &tx_st, &rx_st);
+    bool ok = run_full_transfer(256 * 1024, 0xFEEDFACE, 0, 0, 2, 1, 0, &tx_st, &rx_st);
     assert(ok);
     assert(rx_st.flash_retries == 1);
     assert(tx_st.windows_completed == 4);
@@ -519,6 +547,30 @@ static void test_double_buffer_concurrency(void) {
     printf("  [PASS] Double buffer concurrency verified! Window 1 received chunks while Window 0 was flashing!\n");
 }
 
+/* Test 9 (NIPPON): READY/QUERY_RESP loss on the reverse channel (line B) forces the
+ * sender's WAIT_READY re-query (commit_win_idx) and the receiver's has_last_ready
+ * cache-resend to actually run, and the transfer must still complete and verify. */
+static void test_reverse_channel_ready_loss_recovery(void) {
+    printf("[TEST 9] Reverse channel (line B) READY/QUERY_RESP loss recovery...\n");
+    ota_tx_stats_t tx_st;
+    ota_rx_stats_t rx_st;
+    /* Forward channel is clean; only the first 4 reverse-direction READY/QUERY_RESP
+     * packets are dropped, deterministically forcing the sender into its WAIT_READY
+     * timeout retry path at least once without risking MAX_TIMEOUT_RETRIES (10). */
+    bool ok = run_full_transfer(384 * 1024, 0xB16B00B5, 0, 0, -1, 0, 4, &tx_st, &rx_st);
+    assert(ok);
+    assert(tx_st.windows_completed == 6);
+    assert(rx_st.windows_flashed == 6);
+    /* The dropped READY/QUERY_RESP packets must have provoked at least one extra
+     * QUERY re-send beyond the one normal per-window QUERY (6 windows -> baseline 6). */
+    assert(tx_st.queries_sent > 6);
+    /* At least one recovery MUST have occurred via receiver's last_ready cache resend! */
+    assert(rx_st.last_ready_resends > 0);
+    printf("  [PASS] Recovered from %d dropped reverse-channel packets via %lu total queries "
+           "(%lu resends from last_ready cache), staged image CRC matched!\n",
+           4, (unsigned long)tx_st.queries_sent, (unsigned long)rx_st.last_ready_resends);
+}
+
 /* Test 8: Staging Boundary Hard Guard Check */
 static void test_staging_boundary_guard(void) {
     printf("[TEST 8] Staging boundary safety guard rejection...\n");
@@ -554,7 +606,8 @@ int main(void) {
     test_flash_readback_failure_recovery();
     test_double_buffer_concurrency();
     test_staging_boundary_guard();
+    test_reverse_channel_ready_loss_recovery();
 
-    printf("\n>>> ALL 8 OTA HOST UNIT TESTS PASSED SUCCESSFULLY! <<<\n\n");
+    printf("\n>>> ALL 9 OTA HOST UNIT TESTS PASSED SUCCESSFULLY! <<<\n\n");
     return 0;
 }

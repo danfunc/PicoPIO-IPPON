@@ -3,3 +3,8 @@
 
 # Global gitignore ignores dotfiles; keep this file tracked.
 !.gitignore
+
+# Global gitignore ignores dotfiles; keep Bazel config tracked.
+!.bazelrc
+!.bazelversion
+bazel-*

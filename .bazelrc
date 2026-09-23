@@ -1,0 +1,16 @@
+# 既定ターゲット: RP2350 / pico2_w
+build --platforms=@pico-sdk//bazel/platform:rp2350
+build --@pico-sdk//bazel/config:PICO_BOARD=pico2_w
+
+# macOS 上での sandbox 初期化および PATH 継承の安定化
+build --action_env=PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
+build --strategy=Genrule=local
+
+# ---- ホスト側 (母艦) のテスト・ツールを回すとき ----
+# MCUプラットフォームが既定の場合、ホスト用テストは --config=host で実行する。
+# 例: bazel test --config=host //tests:...
+build:host --platforms=@platforms//host
+test:host --platforms=@platforms//host
+
+# 開発環境ごとのローカル設定 (リポジトリにはコミットしない)
+try-import %workspace%/.bazelrc.user

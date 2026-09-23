@@ -106,6 +106,11 @@ bool bmc_tx_controller_init(bmc_tx_controller_t *tx, PIO pio, uint sm) {
     bmc_tx_controller_zero(tx);
     tx->pio = pio;
     tx->sm_tx = sm;
+    // NIPPON: TXプログラムは "irq set 0 rel" で送出完了を通知する (RP2350データシート 3.4.7.3:
+    // rel 指定時の実効IRQ番号 = (命令中のIRQ番号 + (SM番号 & 3)) & 7)。命令中のIRQ番号は常に0の
+    // ため、実効フラグ番号は sm & 3 に一致する。同一PIOに複数のTX SMを常駐させても
+    // (bmc_p2p*.pio 全4種で共通) フラグが衝突しない。
+    tx->irq_num = sm & 3u;
     tx->offset_tx = 0;
     tx->dma_tx_chan = -1;
     tx->current_tx_pin = 0xFFFFFFFF;
@@ -183,7 +188,7 @@ bool bmc_tx_start_packet_async(bmc_tx_controller_t *tx, uint tx_pin,
 
     bmc_tx_ensure_sm_resident(tx, tx_pin);
 
-    pio_interrupt_clear(tx->pio, 0);
+    pio_interrupt_clear(tx->pio, tx->irq_num);
     tx->pending_t_start = get_absolute_time();
     dma_channel_transfer_from_buffer_now(tx->dma_tx_chan, dma_buf, total_dma_words);
 
@@ -198,14 +203,14 @@ bool bmc_tx_wait_packet_done(bmc_tx_controller_t *tx) {
 
     absolute_time_t timeout = make_timeout_time_ms(10);
     bool success = true;
-    while (!pio_interrupt_get(tx->pio, 0)) {
+    while (!pio_interrupt_get(tx->pio, tx->irq_num)) {
         if (time_reached(timeout)) {
             success = false;
             break;
         }
         tight_loop_contents();
     }
-    pio_interrupt_clear(tx->pio, 0);
+    pio_interrupt_clear(tx->pio, tx->irq_num);
     tx->pending_active = false;
 
     if (success) {
@@ -486,8 +491,8 @@ void bmc_rx_dump_diagnostic(const bmc_rx_port_t *rx) {
     if (!rx) return;
     printf("\n======================================================================\n");
     printf("  [RX DIAGNOSTIC DUMP]\n");
-    printf("  Port: pio%d sm%u GP%u, Rate Family: %d\n",
-           (rx->pio == pio0) ? 0 : 1, rx->sm_rx, rx->rx_pin, (int)rx->rate_family);
+    printf("  Port: pio%u sm%u GP%u, Rate Family: %d\n",
+           pio_get_index(rx->pio), rx->sm_rx, rx->rx_pin, (int)rx->rate_family);
     printf("  1. Total bytes written by DMA: %llu bytes (%llu words, lap: %llu, last_tc: 0x%08lx)\n",
            (unsigned long long)rx->total_bytes_written,
            (unsigned long long)rx->total_words_written,

@@ -1,0 +1,23 @@
+# PicoPIO-IPPON — Bazel モジュール定義
+# RP2350 / RP2040 向け PIO 一線 BMC リンク + OTA プロトコルライブラリ
+module(
+    name = "picopio_ippon",
+    version = "0.1.0",
+)
+
+bazel_dep(name = "platforms", version = "0.0.11")
+bazel_dep(name = "bazel_skylib", version = "1.7.1")
+bazel_dep(name = "rules_cc", version = "0.1.1")
+bazel_dep(name = "pico-sdk", version = "2.2.0")
+
+# pico-sdk のツールチェーン登録 (利用側で明示的に登録)
+register_toolchains(
+    "@pico-sdk//bazel/toolchain:mac-aarch64-rp2040",
+    "@pico-sdk//bazel/toolchain:mac-aarch64-rp2350",
+    "@pico-sdk//bazel/toolchain:mac-x86_64-rp2040",
+    "@pico-sdk//bazel/toolchain:mac-x86_64-rp2350",
+    "@pico-sdk//bazel/toolchain:linux-x86_64-rp2040",
+    "@pico-sdk//bazel/toolchain:linux-x86_64-rp2350",
+    "@pico-sdk//bazel/toolchain:linux-aarch64-rp2040",
+    "@pico-sdk//bazel/toolchain:linux-aarch64-rp2350",
+)

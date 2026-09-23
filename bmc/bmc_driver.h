@@ -58,6 +58,7 @@ typedef enum {
 typedef struct {
     PIO pio;
     uint sm_tx;
+    uint irq_num;                          // NIPPON: 送信完了IRQ番号 (= sm_tx & 3, "irq set 0 rel" 使用時の実効フラグ番号)
     uint offset_tx;
     int dma_tx_chan;
     uint current_tx_pin;
