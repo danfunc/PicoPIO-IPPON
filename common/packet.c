@@ -191,7 +191,7 @@ int BMC_SRAM_FUNC(bmc_find_sync_in_bits)(const uint8_t *buf, size_t buf_len_byte
     static const struct {
         uint32_t pat;
         uint32_t mask;
-    } s_sync_patterns[8] = {
+    } BMC_SRAM_RODATA("bmc_sync") s_sync_patterns[8] = {
         { 0x93C70000u, 0xFFFF0000u },
         { 0x49E38000u, 0x7FFF8000u },
         { 0x24F1C000u, 0x3FFFC000u },
@@ -255,9 +255,11 @@ int BMC_SRAM_FUNC(bmc_extract_bits_as_bytes)(const uint8_t *buf, size_t buf_len_
     } else {
         size_t shift_left = bit_offset;
         size_t shift_right = 8 - bit_offset;
+        uint32_t curr = buf[byte_idx];
         for (size_t i = 0; i < num_bytes; ++i) {
-            out_bytes[i] = (uint8_t)((buf[byte_idx + i] << shift_left) |
-                                     (buf[byte_idx + i + 1] >> shift_right));
+            uint32_t next = buf[byte_idx + i + 1];
+            out_bytes[i] = (uint8_t)((curr << shift_left) | (next >> shift_right));
+            curr = next;
         }
     }
 
@@ -305,12 +307,16 @@ bmc_rx_extract_status_t BMC_SRAM_FUNC(bmc_rx_extract_frame_from_ring)(
     }
 
     uint8_t linear_buf[384];
+    const uint8_t *search_buf;
     size_t first_part = ring_bytes - tail_byte;
     if (avail_bytes <= first_part) {
-        memcpy(linear_buf, &ring_buf[tail_byte], avail_bytes);
+        // ゼロコピー: リング末尾を跨がない場合、リングバッファを直接参照して384B memcpyを回避
+        search_buf = &ring_buf[tail_byte];
     } else {
+        // リング境界を跨ぐ場合のみ結合コピー
         memcpy(linear_buf, &ring_buf[tail_byte], first_part);
         memcpy(linear_buf + first_part, ring_buf, avail_bytes - first_part);
+        search_buf = linear_buf;
     }
 
     size_t total_avail_bits = (size_t)total_avail_bits_needed;
@@ -319,7 +325,7 @@ bmc_rx_extract_status_t BMC_SRAM_FUNC(bmc_rx_extract_frame_from_ring)(
     }
 
     size_t sync_end_bit = 0;
-    int find_res = bmc_find_sync_in_bits(linear_buf, avail_bytes, bit_start, total_avail_bits, &sync_end_bit);
+    int find_res = bmc_find_sync_in_bits(search_buf, avail_bytes, bit_start, total_avail_bits, &sync_end_bit);
     if (find_res != BMC_OK) {
         // 現在の探索範囲にシンク未検出 -> 次回探索のため tail_bit を進める
         // (15bitのシンク跨ぎマージンを残す)
@@ -343,7 +349,7 @@ bmc_rx_extract_status_t BMC_SRAM_FUNC(bmc_rx_extract_frame_from_ring)(
     }
 
     uint8_t len = 0;
-    bmc_extract_bits_as_bytes(linear_buf, avail_bytes, post_sync_start_bit, 1, &len);
+    bmc_extract_bits_as_bytes(search_buf, avail_bytes, post_sync_start_bit, 1, &len);
 
     if (len < BMC_MIN_PAYLOAD_LEN || len > BMC_MAX_PAYLOAD_LEN) {
         // 不正なLEN -> 偽シンクと判定し、検出シンクの直後からビット単位探索を即時再開
@@ -366,11 +372,11 @@ bmc_rx_extract_status_t BMC_SRAM_FUNC(bmc_rx_extract_frame_from_ring)(
 
     // フレーム全体をビット抽出して検証
     uint8_t frame_buf[BMC_MAX_FRAME_BYTES];
-    bmc_extract_bits_as_bytes(linear_buf, avail_bytes, post_sync_start_bit, needed_bytes, frame_buf);
+    bmc_extract_bits_as_bytes(search_buf, avail_bytes, post_sync_start_bit, needed_bytes, frame_buf);
 
     uint8_t type = 0, seq = 0, plen = 0;
-    uint8_t payload_tmp[BMC_MAX_PAYLOAD_LEN];
-    int dec_res = bmc_packet_decode(frame_buf, needed_bytes, &type, &seq, payload_tmp, &plen);
+    uint8_t *target_payload = out_frame ? out_frame->payload : NULL;
+    int dec_res = bmc_packet_decode(frame_buf, needed_bytes, &type, &seq, target_payload, &plen);
 
     if (dec_res > 0) {
         *out_advance_bits = (post_sync_start_bit + needed_bits) - bit_start;
@@ -378,7 +384,6 @@ bmc_rx_extract_status_t BMC_SRAM_FUNC(bmc_rx_extract_frame_from_ring)(
             out_frame->type = type;
             out_frame->seq = seq;
             out_frame->len = plen;
-            memcpy(out_frame->payload, payload_tmp, plen);
         }
         return BMC_RX_EXTRACT_FRAME_OK;
     } else {
@@ -391,7 +396,7 @@ bmc_rx_extract_status_t BMC_SRAM_FUNC(bmc_rx_extract_frame_from_ring)(
 // ============================================================================
 // bmc_rx_calc_total_words
 // ============================================================================
-uint64_t bmc_rx_calc_total_words(uint64_t lap_count, uint32_t current_transfer_count, uint32_t reload_count) {
+uint64_t BMC_SRAM_FUNC(bmc_rx_calc_total_words)(uint64_t lap_count, uint32_t current_transfer_count, uint32_t reload_count) {
     if (reload_count == 0) return 0;
     uint32_t consumed = (current_transfer_count <= reload_count) ?
                         (reload_count - current_transfer_count) : 0;
@@ -401,7 +406,7 @@ uint64_t bmc_rx_calc_total_words(uint64_t lap_count, uint32_t current_transfer_c
 // ============================================================================
 // bmc_rx_calc_delta_words
 // ============================================================================
-uint64_t bmc_rx_calc_delta_words(uint64_t prev_lap_count, uint32_t prev_transfer_count,
+uint64_t BMC_SRAM_FUNC(bmc_rx_calc_delta_words)(uint64_t prev_lap_count, uint32_t prev_transfer_count,
                                  uint64_t curr_lap_count, uint32_t curr_transfer_count,
                                  uint32_t reload_count) {
     if (reload_count == 0 || curr_lap_count < prev_lap_count) return 0;

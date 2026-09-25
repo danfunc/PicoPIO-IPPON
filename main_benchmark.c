@@ -202,7 +202,7 @@ static bool bmc_transport_send(void *ctx, uint pin, const uint32_t *dma_buf, siz
     return bmc_tx_send_packet_blocking(&s_bmc_tx, pin, dma_buf, dma_words);
 }
 
-static bool bmc_transport_poll(void *ctx, uint8_t *out_type, uint8_t *out_seq, uint8_t *out_payload, uint8_t *out_len) {
+static bool BMC_SRAM_FUNC(bmc_transport_poll)(void *ctx, uint8_t *out_type, uint8_t *out_seq, uint8_t *out_payload, uint8_t *out_len) {
     (void)ctx;
     return bmc_rx_poll_packet(&s_bmc_rx, out_type, out_seq, out_payload, out_len);
 }
@@ -261,7 +261,7 @@ static void uart_transport_reset_stats(void *ctx) {
 // -------------------------------------------------------------
 // Core 1 専用非同期RXワーカーループ
 // -------------------------------------------------------------
-static void core1_rx_worker(void) {
+static void BMC_SRAM_FUNC(core1_rx_worker)(void) {
     uint8_t rx_type = 0;
     uint8_t rx_seq = 0;
     uint8_t rx_len = 0;
