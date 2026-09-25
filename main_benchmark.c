@@ -66,12 +66,14 @@ typedef struct {
     bool is_burst;
 } mode_desc_t;
 
+#ifndef POC_RP2040_CLOCK_MHZ
+#define POC_RP2040_CLOCK_MHZ 150
+#endif
+
 // -------------------------------------------------------------
 // BMCモードのクロック分周・レートファミリー (デュオ試験: 実機クロックが異なる2機種で
-// 公称線速を揃える)。 RP2350側は既定sysclk=300MHz、RP2040側はoverclock.cにより150MHz
-// (ちょうど半分) に上げているため、同じ cyc/bit を使うBMCモードの clkdiv を半分にすれば
-// 同じ公称Mbpsが得られる。18.75Mbpsのみ、RP2040では16cyc/bit(clkdiv=0.5)が下限1.0を
-// 割り込むため、8cyc/bitのFastプログラム(clkdiv=1.0, TXパッドFAST)に経路を切り替える。
+// 公称線速を揃える)。 RP2350側は既定sysclk=300MHz、RP2040側はoverclock.cにより
+// 150MHz / 225MHz / 250MHz を選択可能。
 #if PICO_RP2350
 #define BMC_CLKDIV_3M  6.0f
 #define BMC_CLKDIV_9M  2.0f
@@ -81,7 +83,25 @@ typedef struct {
 #define BMC_RATE_FAMILY_18M BMC_RATE_OC_16CYC
 #define BMC_18M_LABEL "18.750M, OC16"
 #define BMC_18M_BURST_LABEL "18.750M Burst, OC16"
-#else
+#elif defined(POC_RP2040_CLOCK_MHZ) && (POC_RP2040_CLOCK_MHZ == 225)
+#define BMC_CLKDIV_3M  4.5f
+#define BMC_CLKDIV_9M  1.5f
+#define BMC_CLKDIV_12M 1.5f
+#define BMC_CLKDIV_15M 1.5f
+#define BMC_CLKDIV_18M 1.5f
+#define BMC_RATE_FAMILY_18M BMC_RATE_FAST_8CYC
+#define BMC_18M_LABEL "18.750M, Fast8@225MHz"
+#define BMC_18M_BURST_LABEL "18.750M Burst, Fast8@225MHz"
+#elif defined(POC_RP2040_CLOCK_MHZ) && (POC_RP2040_CLOCK_MHZ == 250)
+#define BMC_CLKDIV_3M  5.0f
+#define BMC_CLKDIV_9M  1.666667f
+#define BMC_CLKDIV_12M 1.666667f
+#define BMC_CLKDIV_15M 1.666667f
+#define BMC_CLKDIV_18M 1.666667f
+#define BMC_RATE_FAMILY_18M BMC_RATE_FAST_8CYC
+#define BMC_18M_LABEL "18.750M, Fast8@250MHz"
+#define BMC_18M_BURST_LABEL "18.750M Burst, Fast8@250MHz"
+#else // 既定 150MHz
 #define BMC_CLKDIV_3M  3.0f
 #define BMC_CLKDIV_9M  1.0f
 #define BMC_CLKDIV_12M 1.0f
@@ -1298,19 +1318,25 @@ static int bmc_rate_cycles_per_bit(bmc_rate_family_t f) {
 static void benchmark_print_rate_table(void) {
     uint32_t sys_hz = clock_get_hz(clk_sys);
     printf("\n----------------------------------------------------------------------\n");
-    printf("  実効線速テーブル (sysclk=%.1f MHz より算出, BMCは clkdiv/cyc-bit 実測)\n", (float)sys_hz / 1e6f);
-    printf("  Mode                              Target      Actual(計算値)\n");
+    printf("  実効線速テーブル (sysclk=%.2f MHz, BMCは clkdiv/cyc-bit より算出)\n", (float)sys_hz / 1e6f);
+    printf("  Mode                              Target      Actual(計算値)   clkdiv\n");
     for (int m = 0; m < MODE_COUNT; ++m) {
         const mode_desc_t *d = &MODE_DESCS[m];
         float actual_mbps;
+        float divv = 0.0f;
         if (d->is_uart) {
-            actual_mbps = (float)(d->uart_baud & ~PIO_UART_BAUD_FLAG) / 1e6f; // 設定値 (実測ではない)
+            actual_mbps = (float)(d->uart_baud & ~PIO_UART_BAUD_FLAG) / 1e6f; // 設定値
+            printf("  %-32s  %6.3f Mbps   %6.3f Mbps      ---\n", d->name, d->target_phy_mbps, actual_mbps);
         } else {
             float cyc = (float)bmc_rate_cycles_per_bit(d->rate_family);
-            float divv = (d->bmc_clkdiv > 0.0f) ? d->bmc_clkdiv : 1.0f;
-            actual_mbps = (float)sys_hz / divv / cyc / 1e6f;
+            divv = (d->bmc_clkdiv > 0.0f) ? d->bmc_clkdiv : 1.0f;
+            uint16_t div_int = (uint16_t)divv;
+            uint8_t div_frac = (uint8_t)((divv - (float)div_int) * 256.0f);
+            float hw_div = (float)div_int + ((float)div_frac / 256.0f);
+            if (hw_div < 1.0f) hw_div = 1.0f;
+            actual_mbps = (float)sys_hz / hw_div / cyc / 1e6f;
+            printf("  %-32s  %6.3f Mbps   %6.3f Mbps   %6.3f\n", d->name, d->target_phy_mbps, actual_mbps, divv);
         }
-        printf("  %-32s  %6.3f Mbps   %6.3f Mbps\n", d->name, d->target_phy_mbps, actual_mbps);
     }
     printf("----------------------------------------------------------------------\n\n");
 }
@@ -1323,9 +1349,9 @@ int main(void) {
         return 1;
     }
 #else
-    if (!poc_configure_rp2040_150mhz()) {
+    if (!poc_configure_rp2040_clock(POC_RP2040_CLOCK_MHZ)) {
         stdio_init_all();
-        printf("[FATAL] Could not configure RP2040 for 150MHz operation\n");
+        printf("[FATAL] Could not configure RP2040 for %uMHz operation\n", (unsigned)POC_RP2040_CLOCK_MHZ);
         return 1;
     }
 #endif
