@@ -39,8 +39,16 @@ static inline float bmc_get_clkdiv(void) {
 #define BMC_RX_RING_WORDS (BMC_RX_RING_BYTES / sizeof(uint32_t))
 #define BMC_RX_RING_BITS  14
 
-// RX DMA reload ワード数 (RP2350 TRIGGER_SELF 28bit最大値: 0x0FFFFFFF ≈ 268M words ≈ 1.07GB)
+// RX DMA reload ワード数
+// RP2350: TRIGGER_SELF 28bit最大値 (0x0FFFFFFF ≈ 268M words ≈ 1.07GB) で自動リロード。
+// RP2040: self-trigger モード自体が無いため素の32bitカウンタを使う (0xFFFFFFFF)。
+//         カウントダウンが尽きるとDMAは停止し自動リロードしない (RP2040に無い機能なので
+//         再アームは実装しない) が、32bit全域なら実運用レートでは数時間止まらない。
+#if PICO_RP2350
 #define BMC_RX_DMA_RELOAD_WORDS 0x0FFFFFFFu
+#else
+#define BMC_RX_DMA_RELOAD_WORDS 0xFFFFFFFFu
+#endif
 
 // TX プログラム無効オフセット定義
 #define BMC_TX_OFFSET_INVALID   0xFFFFFFFFu

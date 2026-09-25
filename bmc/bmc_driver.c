@@ -444,7 +444,12 @@ bool bmc_rx_port_init_ex(bmc_rx_port_t *rx, PIO pio, uint sm, uint offset_rx,
 
     // 7. 必ず RX DMA を先行起動し、その後に RX SM を有効化する
     // RP2350: TRIGGER_SELF モード + 28bit RELOAD COUNT (0x0FFFFFFF ≈ 268M transfers ≈ 1.07GB)
+    // RP2040: self-trigger 非対応のため素の32bitカウント (モードビット無し)。
+#if PICO_RP2350
     uint32_t encoded_tc = dma_encode_transfer_count_with_self_trigger(BMC_RX_DMA_RELOAD_WORDS);
+#else
+    uint32_t encoded_tc = dma_encode_transfer_count(BMC_RX_DMA_RELOAD_WORDS);
+#endif
     dma_channel_configure(rx->dma_rx_chan, &dc, rx->rx_ring_buf, &pio->rxf[sm], encoded_tc, true);
     pio_sm_set_enabled(pio, sm, true);
 
@@ -466,7 +471,12 @@ bool BMC_SRAM_FUNC(bmc_rx_poll_packet)(bmc_rx_port_t *rx,
     //    オーバーラン復旧時の safe_tail_byte もこのヘッド位置を基準にするため、同一の読み出し
     //    から一貫して導出する)。
     uint32_t raw_tc = dma_hw->ch[rx->dma_rx_chan].transfer_count;
+    // RP2350: 上位4bitはMODEフィールドなのでマスクして除く。RP2040: レジスタ全体が素の32bitカウント。
+#if PICO_RP2350
     uint32_t curr_tc = raw_tc & DMA_CH0_TRANS_COUNT_COUNT_BITS;
+#else
+    uint32_t curr_tc = raw_tc;
+#endif
     uint32_t prev_tc = rx->last_transfer_count;
 
     // B-X: 直前の抽出試行が「現在届いているデータでは判定不能/シンク未検出」で終わっており

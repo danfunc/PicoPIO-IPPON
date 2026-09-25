@@ -54,3 +54,17 @@ bool poc_configure_300mhz(void) {
     return clock_get_hz(clk_peri) == sys_hz / 2u;
 #endif
 }
+
+#define POC_RP2040_SYS_CLOCK_KHZ 150000u
+
+bool poc_configure_rp2040_150mhz(void) {
+#if PICO_RP2350
+    return false;
+#else
+    if (!set_sys_clock_khz(POC_RP2040_SYS_CLOCK_KHZ, true) ||
+        clock_get_hz(clk_sys) != POC_RP2040_SYS_CLOCK_KHZ * 1000u) {
+        return false;
+    }
+    return true;
+#endif
+}

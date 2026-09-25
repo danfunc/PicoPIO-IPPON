@@ -22,6 +22,10 @@
 #define PIN_TX 0
 #define PIN_RX 1
 
+#ifndef POC_BOARD_NAME
+#define POC_BOARD_NAME "unknown-board"
+#endif
+
 #define UART_ID uart0
 #define PIO_UART_BAUD_FLAG 0x80000000u
 
@@ -42,10 +46,12 @@ typedef enum {
     MODE_BMC_12M_BURST,  // BMC 12.500 Mbps (12 cyc/bit, clkdiv 2.0f @ 300MHz, Burst 連続送信)
     MODE_BMC_15M,        // BMC 15.000 Mbps (10 cyc/bit, clkdiv 2.0f @ 300MHz, 停止待ち)
     MODE_BMC_15M_BURST,  // BMC 15.000 Mbps (10 cyc/bit, clkdiv 2.0f @ 300MHz, Burst 連続送信)
-    MODE_BMC_18M_BURST,  // BMC 18.750 Mbps (16 cyc/bit @ 300MHz, EXPERIMENTAL, Burst 連続送信)
+    MODE_BMC_18M_BURST,  // BMC 18.750 Mbps (RP2350: 16 cyc/bit@300MHz OC16 / RP2040: 8 cyc/bit@150MHz Fast8, EXPERIMENTAL, Burst 連続送信)
     MODE_PIO_UART_9M_BURST,
     MODE_PIO_UART_18M_BURST,
     MODE_PIO_UART_37M_BURST,
+    MODE_PIO_UART_12M_BURST,
+    MODE_PIO_UART_15M_BURST,
     MODE_COUNT
 } bench_mode_t;
 
@@ -60,24 +66,52 @@ typedef struct {
     bool is_burst;
 } mode_desc_t;
 
+// -------------------------------------------------------------
+// BMCモードのクロック分周・レートファミリー (デュオ試験: 実機クロックが異なる2機種で
+// 公称線速を揃える)。 RP2350側は既定sysclk=300MHz、RP2040側はoverclock.cにより150MHz
+// (ちょうど半分) に上げているため、同じ cyc/bit を使うBMCモードの clkdiv を半分にすれば
+// 同じ公称Mbpsが得られる。18.75Mbpsのみ、RP2040では16cyc/bit(clkdiv=0.5)が下限1.0を
+// 割り込むため、8cyc/bitのFastプログラム(clkdiv=1.0, TXパッドFAST)に経路を切り替える。
+#if PICO_RP2350
+#define BMC_CLKDIV_3M  6.0f
+#define BMC_CLKDIV_9M  2.0f
+#define BMC_CLKDIV_12M 2.0f
+#define BMC_CLKDIV_15M 2.0f
+#define BMC_CLKDIV_18M 1.0f
+#define BMC_RATE_FAMILY_18M BMC_RATE_OC_16CYC
+#define BMC_18M_LABEL "18.750M, OC16"
+#define BMC_18M_BURST_LABEL "18.750M Burst, OC16"
+#else
+#define BMC_CLKDIV_3M  3.0f
+#define BMC_CLKDIV_9M  1.0f
+#define BMC_CLKDIV_12M 1.0f
+#define BMC_CLKDIV_15M 1.0f
+#define BMC_CLKDIV_18M 1.0f
+#define BMC_RATE_FAMILY_18M BMC_RATE_FAST_8CYC
+#define BMC_18M_LABEL "18.750M, Fast8@150MHz"
+#define BMC_18M_BURST_LABEL "18.750M Burst, Fast8@150MHz"
+#endif
+
 static const mode_desc_t MODE_DESCS[MODE_COUNT] = {
     [MODE_UART_3M]        = {"UART ( 3.000M)",        3.000f, true,  BMC_RATE_STD_16CYC, 0.0f, 3000000, false, false},
     [MODE_UART_9M]        = {"UART ( 9.375M)",        9.375f, true,  BMC_RATE_STD_16CYC, 0.0f, 9375000, false, false},
-    [MODE_BMC_3M]         = {"BMC  ( 3.125M)",        3.125f, false, BMC_RATE_STD_16CYC, 6.0f,       0, false, false},
-    [MODE_BMC_9M]         = {"BMC  ( 9.375M)",        9.375f, false, BMC_RATE_STD_16CYC, 2.0f,       0, false, false},
-    [MODE_BMC_18M]        = {"BMC  (18.750M, OC16)", 18.750f, false, BMC_RATE_OC_16CYC, 1.0f, 0, true, false},
+    [MODE_BMC_3M]         = {"BMC  ( 3.125M)",        3.125f, false, BMC_RATE_STD_16CYC, BMC_CLKDIV_3M,       0, false, false},
+    [MODE_BMC_9M]         = {"BMC  ( 9.375M)",        9.375f, false, BMC_RATE_STD_16CYC, BMC_CLKDIV_9M,       0, false, false},
+    [MODE_BMC_18M]        = {"BMC  (" BMC_18M_LABEL ")", 18.750f, false, BMC_RATE_FAMILY_18M, BMC_CLKDIV_18M, 0, true, false},
     [MODE_UART_3M_BURST]  = {"UART ( 3.000M Burst)",  3.000f, true,  BMC_RATE_STD_16CYC, 0.0f, 3000000, false, true},
     [MODE_UART_9M_BURST]  = {"UART ( 9.375M Burst)",  9.375f, true,  BMC_RATE_STD_16CYC, 0.0f, 9375000, false, true},
-    [MODE_BMC_3M_BURST]   = {"BMC  ( 3.125M Burst)",  3.125f, false, BMC_RATE_STD_16CYC, 6.0f,       0, false, true},
-    [MODE_BMC_9M_BURST]   = {"BMC  ( 9.375M Burst)",  9.375f, false, BMC_RATE_STD_16CYC, 2.0f,       0, false, true},
-    [MODE_BMC_12M]        = {"BMC  (12.500M)",       12.500f, false, BMC_RATE_MID_12CYC, 2.0f,       0, false, false},
-    [MODE_BMC_12M_BURST]  = {"BMC  (12.500M Burst)", 12.500f, false, BMC_RATE_MID_12CYC, 2.0f,       0, false, true},
-    [MODE_BMC_15M]        = {"BMC  (15.000M)",       15.000f, false, BMC_RATE_MID_10CYC, 2.0f,       0, false, false},
-    [MODE_BMC_15M_BURST]  = {"BMC  (15.000M Burst)", 15.000f, false, BMC_RATE_MID_10CYC, 2.0f,       0, false, true},
-    [MODE_BMC_18M_BURST]  = {"BMC  (18.750M Burst, OC16)", 18.750f, false, BMC_RATE_OC_16CYC, 1.0f, 0, true, true},
+    [MODE_BMC_3M_BURST]   = {"BMC  ( 3.125M Burst)",  3.125f, false, BMC_RATE_STD_16CYC, BMC_CLKDIV_3M,       0, false, true},
+    [MODE_BMC_9M_BURST]   = {"BMC  ( 9.375M Burst)",  9.375f, false, BMC_RATE_STD_16CYC, BMC_CLKDIV_9M,       0, false, true},
+    [MODE_BMC_12M]        = {"BMC  (12.500M)",       12.500f, false, BMC_RATE_MID_12CYC, BMC_CLKDIV_12M,       0, false, false},
+    [MODE_BMC_12M_BURST]  = {"BMC  (12.500M Burst)", 12.500f, false, BMC_RATE_MID_12CYC, BMC_CLKDIV_12M,       0, false, true},
+    [MODE_BMC_15M]        = {"BMC  (15.000M)",       15.000f, false, BMC_RATE_MID_10CYC, BMC_CLKDIV_15M,       0, false, false},
+    [MODE_BMC_15M_BURST]  = {"BMC  (15.000M Burst)", 15.000f, false, BMC_RATE_MID_10CYC, BMC_CLKDIV_15M,       0, false, true},
+    [MODE_BMC_18M_BURST]  = {"BMC  (" BMC_18M_BURST_LABEL ")", 18.750f, false, BMC_RATE_FAMILY_18M, BMC_CLKDIV_18M, 0, true, true},
     [MODE_PIO_UART_9M_BURST] = {"PIO UART (9.375M Burst, 8N1)", 9.375f, true, BMC_RATE_STD_16CYC, 0.0f, PIO_UART_BAUD_FLAG | 9375000u, false, true},
     [MODE_PIO_UART_18M_BURST] = {"PIO UART (18.750M Burst, 8N1)", 18.750f, true, BMC_RATE_STD_16CYC, 0.0f, PIO_UART_BAUD_FLAG | 18750000u, false, true},
-    [MODE_PIO_UART_37M_BURST] = {"PIO UART (37.500M Burst, 8N1)", 37.500f, true, BMC_RATE_STD_16CYC, 0.0f, PIO_UART_BAUD_FLAG | 37500000u, true, true}
+    [MODE_PIO_UART_37M_BURST] = {"PIO UART (37.500M Burst, 8N1)", 37.500f, true, BMC_RATE_STD_16CYC, 0.0f, PIO_UART_BAUD_FLAG | 37500000u, true, true},
+    [MODE_PIO_UART_12M_BURST] = {"PIO UART (12.500M Burst, 8N1)", 12.500f, true, BMC_RATE_STD_16CYC, 0.0f, PIO_UART_BAUD_FLAG | 12500000u, false, true},
+    [MODE_PIO_UART_15M_BURST] = {"PIO UART (15.000M Burst, 8N1)", 15.000f, true, BMC_RATE_STD_16CYC, 0.0f, PIO_UART_BAUD_FLAG | 15000000u, false, true}
 };
 
 static inline bool bmc_is_18m_rate(bmc_rate_family_t family) {
@@ -151,6 +185,11 @@ static volatile uint64_t s_diag_rx_elapsed_us = 0;
 static volatile uint8_t s_diag_rx_seq = 0;
 static volatile bool s_diag_rx_got = false;
 static volatile bool s_diag_ready_to_print = false;
+
+// ピア識別情報 (相手ボードのビルド識別子/ボード種別。Burst送信の先頭フレームで乗せる)
+#define PEER_INFO_TEXT_MAX 64
+static volatile bool s_peer_info_seen = false;
+static char s_peer_info_text[PEER_INFO_TEXT_MAX];
 
 static bool apply_mode(bench_mode_t mode);
 static void benchmark_print_sweep_summary(void);
@@ -279,18 +318,29 @@ static void core1_rx_worker(void) {
                 diag_polls = 0;
             }
 
-            // 連続送信パケットのペイロード整合性検証
-            bool match = (rx_type == BMC_PKT_TYPE_BENCH);
-            if (match) {
-                for (int i = 0; i < rx_len; ++i) {
-                    if (s_core1_rx_buf[i] != (uint8_t)(rx_seq + i)) {
-                        match = false;
-                        break;
+            if (rx_type == BMC_PKT_TYPE_PEER_INFO) {
+                // ピア識別情報フレーム: 自TXとの照合対象外。テキストとして保存し表示に回す。
+                size_t n = (rx_len < sizeof(s_peer_info_text) - 1) ? rx_len : sizeof(s_peer_info_text) - 1;
+                memcpy(s_peer_info_text, s_core1_rx_buf, n);
+                s_peer_info_text[n] = '\0';
+                s_peer_info_seen = true;
+            } else {
+                // 連続送信パケットのペイロード整合性検証 (自SEQから生成された規則のみで判定、自TXとは照合しない)
+                bool match = (rx_type == BMC_PKT_TYPE_BENCH);
+                if (match) {
+                    for (int i = 0; i < rx_len; ++i) {
+                        if (s_core1_rx_buf[i] != (uint8_t)(rx_seq + i)) {
+                            match = false;
+                            break;
+                        }
                     }
                 }
-            }
-            if (!match) {
-                __sync_fetch_and_add(&s_stats.verify_errors, 1);
+                if (!match) {
+                    // B-duo: RP2040 (Cortex-M0+) はLDREX/STREXを持たず__sync_*組込みがリンク不能なため、
+                    // 素の++にする。TX側(core0)も同フィールドを非アトミックに加算しており、
+                    // ベンチマークカウンタとして稀な取りこぼしは許容範囲 (既存挙動と整合)。
+                    s_stats.verify_errors++;
+                }
             }
             __sync_synchronize();
         } else {
@@ -430,8 +480,16 @@ static bool setup_uart(uint32_t baudrate) {
         s_use_pio_uart = initialized;
     } else {
         const uint32_t sys_hz = clock_get_hz(clk_sys);
+        // RP2350 (sysclk 300MHz) は clk_peri=150MHz が既定。RP2040側でも同じ 9.375Mbps
+        // 上限 (clk_peri/16) を揃えるため、RP2040 (sysclk 150MHz) では clk_peri=sysclkのまま
+        // (割らない) にする。
+#if PICO_RP2350
+        const uint32_t peri_hz = sys_hz / 2u;
+#else
+        const uint32_t peri_hz = sys_hz;
+#endif
         clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS,
-                        sys_hz, sys_hz / 2u);
+                        sys_hz, peri_hz);
         initialized = uart_driver_init(&s_uart_drv, UART_ID, PIN_TX, PIN_RX, baudrate);
     }
     if (!initialized) {
@@ -497,6 +555,10 @@ static bool apply_mode(bench_mode_t mode) {
     // 不具合1(b) 診断用フラグ設定
     s_diag_first_rx_pending = true;
     s_diag_ready_to_print = false;
+
+    // ピア識別情報は旧モードのものを持ち越さない
+    s_peer_info_seen = false;
+    s_peer_info_text[0] = '\0';
 
     // 連続送信モードの場合は Core 1 の非同期RXを有効化
     if (desc->is_burst) {
@@ -768,13 +830,25 @@ static void BMC_SRAM_FUNC(benchmark_run_burst_tx)(void) {
     uint8_t current_len = g_poc_test_lens[s_len_idx];
     s_len_idx = (s_len_idx + 1) % g_poc_num_test_lens;
 
-    for (int i = 0; i < current_len; ++i) {
-        s_tx_payload[i] = (uint8_t)(s_seq + i);
+    // ピア識別情報ビーコン: SEQが一周する度 (256パケットに1回) に、通常のBENCHフレームの
+    // 代わりにボード種別/ビルド識別子を乗せたPEER_INFOフレームを送る。SEQは通常通り消費する
+    // ため受信側のSEQ連続性検査 (rx_seq_drops) には影響しない。
+    uint8_t pkt_type = BMC_PKT_TYPE_BENCH;
+    if (s_seq == 0) {
+        int n = snprintf((char *)s_tx_payload, BMC_MAX_PAYLOAD_LEN, "board=%s sysclk=%luMHz git=%s",
+                          POC_BOARD_NAME, (unsigned long)(clock_get_hz(clk_sys) / 1000000u),
+                          build_info_get_git_commit());
+        current_len = (n > 0 && n < BMC_MAX_PAYLOAD_LEN) ? (uint8_t)n : 0;
+        pkt_type = BMC_PKT_TYPE_PEER_INFO;
+    } else {
+        for (int i = 0; i < current_len; ++i) {
+            s_tx_payload[i] = (uint8_t)(s_seq + i);
+        }
     }
 
     if (MODE_DESCS[s_current_mode].is_uart) {
         if (!s_active_transport.send_packet) return;
-        size_t dma_words = bmc_packet_encode(s_tx_dma_words, BMC_PKT_TYPE_BENCH, s_seq, s_tx_payload, current_len);
+        size_t dma_words = bmc_packet_encode(s_tx_dma_words, pkt_type, s_seq, s_tx_payload, current_len);
         if (dma_words == 0) return;
         bool tx_ok = s_active_transport.send_packet(s_active_transport.ctx, PIN_TX, s_tx_dma_words, dma_words, current_len);
         if (!tx_ok) {
@@ -784,7 +858,7 @@ static void BMC_SRAM_FUNC(benchmark_run_burst_tx)(void) {
     } else {
         // B-4: BMC TXパイプライン化。前パケットのPHY送信中に次パケットをエンコードする。
         uint32_t *buf = s_tx_dma_words_pipeline[s_tx_pipeline_next];
-        size_t dma_words = bmc_packet_encode(buf, BMC_PKT_TYPE_BENCH, s_seq, s_tx_payload, current_len);
+        size_t dma_words = bmc_packet_encode(buf, pkt_type, s_seq, s_tx_payload, current_len);
         if (dma_words == 0) return;
 
         if (s_tx_pipeline_active) {
@@ -908,6 +982,10 @@ static void benchmark_maybe_report(void) {
                (unsigned long)s_stats.rx_overrun_errors,
                (unsigned long)s_stats.late_arrival_drops,
                avg_rx_cpu_us, (unsigned long)s_stats.rx_cpu_cost_max_us);
+
+        if (s_peer_info_seen) {
+            printf("    [PEER] %s\n", s_peer_info_text);
+        }
 
         s_last_report_time = now;
         s_report_tx_bytes_start = s_stats.tx_bytes;
@@ -1059,6 +1137,12 @@ static void benchmark_process_input(void) {
     } else if (ch == 'n' || ch == 'N') {
         s_auto_sweep = false;
         apply_mode(MODE_PIO_UART_37M_BURST);
+    } else if (ch == 'u' || ch == 'U') {
+        s_auto_sweep = false;
+        apply_mode(MODE_PIO_UART_12M_BURST);
+    } else if (ch == 'v' || ch == 'V') {
+        s_auto_sweep = false;
+        apply_mode(MODE_PIO_UART_15M_BURST);
     } else if (ch == 'p' || ch == 'P') {
         s_pad_slew = (s_pad_slew == BMC_PAD_SLEW_SLOW) ? BMC_PAD_SLEW_FAST : BMC_PAD_SLEW_SLOW;
         printf("\n>>> TX Pad Slew toggled: %s <<<\n", (s_pad_slew == BMC_PAD_SLEW_FAST) ? "FAST" : "SLOW");
@@ -1164,6 +1248,8 @@ static void benchmark_print_banner(void) {
     printf("    [k] PIO UART  9.375 Mbps Burst (official 8N1 PIO + DMA)\n");
     printf("    [m] PIO UART 18.750 Mbps Burst (official 8N1 PIO + DMA)\n");
     printf("    [n] PIO UART 37.500 Mbps Burst (official 8N1 PIO + DMA, EXPERIMENTAL)\n");
+    printf("    [u] PIO UART 12.500 Mbps Burst (official 8N1 PIO + DMA)\n");
+    printf("    [v] PIO UART 15.000 Mbps Burst (official 8N1 PIO + DMA)\n");
     printf("    [a] または [s]: 全モード自動スイープ比較 (各4秒計測 & サマリー表出力)\n");
     printf("    [ ] (スペース): 一時停止 / 再開\n");
     printf("    [r]: 統計リセット\n");
@@ -1193,16 +1279,62 @@ static void benchmark_wait_for_usb(void) {
 // -------------------------------------------------------------
 // M-1: メイン関数 (80行以内を厳格遵守)
 // -------------------------------------------------------------
+// -------------------------------------------------------------
+// 起動ログ: 実クロックから逆算した各モードの実効線速テーブル (Opusが2枚のボードの
+// 実測ログを目視で突き合わせられるように、clock_get_hz(clk_sys) と分周・cyc/bit から
+// 都度算出する。UART/PIO UARTは要求ボーレートをそのまま表示 (実測ではなく設定値)。
+// -------------------------------------------------------------
+static int bmc_rate_cycles_per_bit(bmc_rate_family_t f) {
+    switch (f) {
+        case BMC_RATE_MID_12CYC: return 12;
+        case BMC_RATE_MID_10CYC: return 10;
+        case BMC_RATE_FAST_8CYC: return 8;
+        case BMC_RATE_OC_16CYC:  return 16;
+        case BMC_RATE_STD_16CYC:
+        default:                 return 16;
+    }
+}
+
+static void benchmark_print_rate_table(void) {
+    uint32_t sys_hz = clock_get_hz(clk_sys);
+    printf("\n----------------------------------------------------------------------\n");
+    printf("  実効線速テーブル (sysclk=%.1f MHz より算出, BMCは clkdiv/cyc-bit 実測)\n", (float)sys_hz / 1e6f);
+    printf("  Mode                              Target      Actual(計算値)\n");
+    for (int m = 0; m < MODE_COUNT; ++m) {
+        const mode_desc_t *d = &MODE_DESCS[m];
+        float actual_mbps;
+        if (d->is_uart) {
+            actual_mbps = (float)(d->uart_baud & ~PIO_UART_BAUD_FLAG) / 1e6f; // 設定値 (実測ではない)
+        } else {
+            float cyc = (float)bmc_rate_cycles_per_bit(d->rate_family);
+            float divv = (d->bmc_clkdiv > 0.0f) ? d->bmc_clkdiv : 1.0f;
+            actual_mbps = (float)sys_hz / divv / cyc / 1e6f;
+        }
+        printf("  %-32s  %6.3f Mbps   %6.3f Mbps\n", d->name, d->target_phy_mbps, actual_mbps);
+    }
+    printf("----------------------------------------------------------------------\n\n");
+}
+
 int main(void) {
+#if PICO_RP2350
     if (!poc_configure_300mhz()) {
         stdio_init_all();
         printf("[FATAL] Could not configure RP2350 for 300MHz operation\n");
         return 1;
     }
+#else
+    if (!poc_configure_rp2040_150mhz()) {
+        stdio_init_all();
+        printf("[FATAL] Could not configure RP2040 for 150MHz operation\n");
+        return 1;
+    }
+#endif
     stdio_init_all();
     benchmark_wait_for_usb();
     build_info_print("poc_benchmark");
+    printf("[BOARD] %s\n", POC_BOARD_NAME);
     benchmark_print_banner();
+    benchmark_print_rate_table();
     benchmark_init_hardware();
 
     // Core 1 非同期RXワーカーの起動

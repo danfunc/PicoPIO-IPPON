@@ -17,6 +17,7 @@ extern "C" {
 #define BMC_PKT_TYPE_ECHO_RES 0x02
 #define BMC_PKT_TYPE_DATA     0x10
 #define BMC_PKT_TYPE_BENCH    0x20
+#define BMC_PKT_TYPE_PEER_INFO 0x30
 
 #define BMC_MAX_PAYLOAD_LEN   128
 #define BMC_MIN_PAYLOAD_LEN   1

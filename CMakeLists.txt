@@ -179,6 +179,10 @@ target_link_libraries(poc_benchmark PRIVATE
     poc_common
 )
 
+target_compile_definitions(poc_benchmark PRIVATE
+    POC_BOARD_NAME="${PICO_BOARD}"
+)
+
 pico_enable_stdio_usb(poc_benchmark 1)
 pico_enable_stdio_uart(poc_benchmark 0)
 
