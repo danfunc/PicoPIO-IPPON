@@ -19,6 +19,13 @@ void bmc_tx_pin_init(uint pin) {
 // ============================================================================
 // TX コントローラ内部ヘルパー: 常駐SMのピンおよびモード確立
 // ============================================================================
+static inline uint bmc_tx_get_active_offset(const bmc_tx_controller_t *tx) {
+    if (tx->tx_use_isr_variant && tx->offset_tx_isr != BMC_TX_OFFSET_INVALID) {
+        return tx->offset_tx_isr;
+    }
+    return tx->offset_tx;
+}
+
 static void bmc_tx_ensure_sm_resident(bmc_tx_controller_t *tx, uint tx_pin) {
     if (tx->current_tx_pin == tx_pin) {
         return; // 既に当該ピンで常駐稼働中
@@ -27,6 +34,8 @@ static void bmc_tx_ensure_sm_resident(bmc_tx_controller_t *tx, uint tx_pin) {
     PIO pio = tx->pio;
     uint sm = tx->sm_tx;
     float clkdiv = (tx->clkdiv > 0.0f) ? tx->clkdiv : bmc_get_clkdiv();
+    bool use_isr = (tx->tx_use_isr_variant && tx->offset_tx_isr != BMC_TX_OFFSET_INVALID);
+    uint active_offset = use_isr ? tx->offset_tx_isr : tx->offset_tx;
 
     // 1. SM停止 & DMAアボート
     pio_sm_set_enabled(pio, sm, false);
@@ -35,34 +44,64 @@ static void bmc_tx_ensure_sm_resident(bmc_tx_controller_t *tx, uint tx_pin) {
     }
 
     // 2. PIOプログラム初期化 (SIO High保持 -> PIOラッチHigh/方向OUT準備 -> Mux PIO)
-    switch (tx->rate_family) {
-        case BMC_RATE_MID_12CYC:
-            bmc_mid12_tx_program_init(pio, sm, tx->offset_tx, tx_pin, clkdiv);
-            break;
-        case BMC_RATE_MID_10CYC:
-            bmc_mid10_tx_program_init(pio, sm, tx->offset_tx, tx_pin, clkdiv);
-            break;
-        case BMC_RATE_FAST_8CYC:
-            bmc_fast_tx_program_init(pio, sm, tx->offset_tx, tx_pin, clkdiv);
-            break;
-        case BMC_RATE_STD_16CYC:
-        default:
-            bmc_tx_program_init(pio, sm, tx->offset_tx, tx_pin, clkdiv);
-            break;
+    if (use_isr) {
+        switch (tx->rate_family) {
+            case BMC_RATE_MID_12CYC:
+                bmc_mid12_tx_isr_program_init(pio, sm, active_offset, tx_pin, clkdiv);
+                break;
+            case BMC_RATE_MID_10CYC:
+                bmc_mid10_tx_isr_program_init(pio, sm, active_offset, tx_pin, clkdiv);
+                break;
+            case BMC_RATE_FAST_8CYC:
+                bmc_fast_tx_isr_program_init(pio, sm, active_offset, tx_pin, clkdiv);
+                break;
+            case BMC_RATE_OC_16CYC:
+            case BMC_RATE_STD_16CYC:
+            default:
+                bmc_tx_isr_program_init(pio, sm, active_offset, tx_pin, clkdiv);
+                break;
+        }
+    } else {
+        switch (tx->rate_family) {
+            case BMC_RATE_MID_12CYC:
+                bmc_mid12_tx_program_init(pio, sm, active_offset, tx_pin, clkdiv);
+                break;
+            case BMC_RATE_MID_10CYC:
+                bmc_mid10_tx_program_init(pio, sm, active_offset, tx_pin, clkdiv);
+                break;
+            case BMC_RATE_FAST_8CYC:
+                bmc_fast_tx_program_init(pio, sm, active_offset, tx_pin, clkdiv);
+                break;
+            case BMC_RATE_OC_16CYC:
+            case BMC_RATE_STD_16CYC:
+            default:
+                bmc_tx_program_init(pio, sm, active_offset, tx_pin, clkdiv);
+                break;
+        }
     }
 
-    // B-1: パッド設定バリアントの適用
-    // 制約: この変種は rate_family == BMC_RATE_FAST_8CYC のときのみ適用可能とし、
-    //       BMC_RATE_STD_16CYC には絶対に適用しない
-    if (tx->pad_fast_variant && tx->rate_family == BMC_RATE_FAST_8CYC) {
-        gpio_set_slew_rate(tx_pin, GPIO_SLEW_RATE_FAST);
-        gpio_set_drive_strength(tx_pin, GPIO_DRIVE_STRENGTH_8MA);
+    // 18.75 Mbps profiles use the independently selected TX pad settings.
+    if (tx->rate_family == BMC_RATE_FAST_8CYC ||
+        tx->rate_family == BMC_RATE_OC_16CYC) {
+        gpio_set_slew_rate(tx_pin, (tx->pad_slew == BMC_PAD_SLEW_FAST) ? GPIO_SLEW_RATE_FAST : GPIO_SLEW_RATE_SLOW);
+        enum gpio_drive_strength ds;
+        switch (tx->pad_drive) {
+            case BMC_PAD_DRIVE_2MA:  ds = GPIO_DRIVE_STRENGTH_2MA; break;
+            case BMC_PAD_DRIVE_8MA:  ds = GPIO_DRIVE_STRENGTH_8MA; break;
+            case BMC_PAD_DRIVE_12MA: ds = GPIO_DRIVE_STRENGTH_12MA; break;
+            case BMC_PAD_DRIVE_4MA:
+            default:                 ds = GPIO_DRIVE_STRENGTH_4MA; break;
+        }
+        gpio_set_drive_strength(tx_pin, ds);
     }
 
     // 3. FIFOクリア & 初期PC設定 (idle: set pins, 1; pull block)
     pio_sm_clear_fifos(pio, sm);
     pio_sm_exec(pio, sm, pio_encode_set(pio_pins, 1));
-    pio_sm_exec(pio, sm, pio_encode_jmp(tx->offset_tx));
+    if (use_isr) {
+        pio_sm_exec(pio, sm, pio_encode_mov_not(pio_isr, pio_null));
+    }
+    pio_sm_exec(pio, sm, pio_encode_jmp(active_offset));
 
     // 4. TX SM を常駐有効化 (pull block で待機)
     pio_sm_set_enabled(pio, sm, true);
@@ -78,7 +117,11 @@ void bmc_tx_controller_zero(bmc_tx_controller_t *tx) {
     tx->dma_tx_chan = -1;
     tx->current_tx_pin = 0xFFFFFFFF;
     tx->rate_family = BMC_RATE_STD_16CYC;
-    tx->pad_fast_variant = false;
+    tx->offset_tx = BMC_TX_OFFSET_INVALID;
+    tx->offset_tx_isr = BMC_TX_OFFSET_INVALID;
+    tx->pad_slew = BMC_PAD_SLEW_SLOW;
+    tx->pad_drive = BMC_PAD_DRIVE_4MA;
+    tx->tx_use_isr_variant = false;
     tx->pending_active = false;
     tx->is_initialized = false;
 }
@@ -112,11 +155,14 @@ bool bmc_tx_controller_init(bmc_tx_controller_t *tx, PIO pio, uint sm) {
     // (bmc_p2p*.pio 全4種で共通) フラグが衝突しない。
     tx->irq_num = sm & 3u;
     tx->offset_tx = 0;
+    tx->offset_tx_isr = BMC_TX_OFFSET_INVALID;
+    tx->tx_use_isr_variant = false;
     tx->dma_tx_chan = -1;
     tx->current_tx_pin = 0xFFFFFFFF;
     tx->clkdiv = bmc_get_clkdiv();
     tx->rate_family = BMC_RATE_STD_16CYC;
-    tx->pad_fast_variant = false;
+    tx->pad_slew = BMC_PAD_SLEW_SLOW;
+    tx->pad_drive = BMC_PAD_DRIVE_4MA;
     poc_stats_reset(&tx->stats);
 
     // PIOプログラムの空き領域確認・登録
@@ -145,10 +191,44 @@ bool bmc_tx_controller_init(bmc_tx_controller_t *tx, PIO pio, uint sm) {
 }
 
 void bmc_tx_controller_set_mode(bmc_tx_controller_t *tx, uint offset_tx, float clkdiv, bmc_rate_family_t rate_family) {
+    bmc_tx_controller_set_mode_ex(tx, offset_tx, BMC_TX_OFFSET_INVALID, clkdiv, rate_family);
+}
+
+void bmc_tx_controller_set_mode_ex(bmc_tx_controller_t *tx, uint offset_tx, uint offset_tx_isr, float clkdiv, bmc_rate_family_t rate_family) {
     if (!tx) return;
     tx->offset_tx = offset_tx;
+    tx->offset_tx_isr = offset_tx_isr;
     tx->clkdiv = (clkdiv > 0.0f) ? clkdiv : bmc_get_clkdiv();
     tx->rate_family = rate_family;
+
+    // ISR版オフセットが無効な場合はISR版フラグを安全に解除
+    if (tx->tx_use_isr_variant && tx->offset_tx_isr == BMC_TX_OFFSET_INVALID) {
+        tx->tx_use_isr_variant = false;
+    }
+
+    // 既にピンが割当済みの場合は常駐SMを再初期化
+    if (tx->current_tx_pin != 0xFFFFFFFF) {
+        uint pin = tx->current_tx_pin;
+        tx->current_tx_pin = 0xFFFFFFFF; // 強制再構成
+        bmc_tx_ensure_sm_resident(tx, pin);
+    }
+}
+
+void bmc_tx_controller_set_pad_slew(bmc_tx_controller_t *tx, bmc_pad_slew_t pad_slew) {
+    if (!tx) return;
+    tx->pad_slew = pad_slew;
+
+    // 既にピンが割当済みの場合は常駐SMを再初期化
+    if (tx->current_tx_pin != 0xFFFFFFFF) {
+        uint pin = tx->current_tx_pin;
+        tx->current_tx_pin = 0xFFFFFFFF; // 強制再構成
+        bmc_tx_ensure_sm_resident(tx, pin);
+    }
+}
+
+void bmc_tx_controller_set_pad_drive(bmc_tx_controller_t *tx, bmc_pad_drive_t pad_drive) {
+    if (!tx) return;
+    tx->pad_drive = pad_drive;
 
     // 既にピンが割当済みの場合は常駐SMを再初期化
     if (tx->current_tx_pin != 0xFFFFFFFF) {
@@ -160,7 +240,8 @@ void bmc_tx_controller_set_mode(bmc_tx_controller_t *tx, uint offset_tx, float c
 
 void bmc_tx_controller_set_pad_variant(bmc_tx_controller_t *tx, bool pad_fast_variant) {
     if (!tx) return;
-    tx->pad_fast_variant = pad_fast_variant;
+    tx->pad_slew = pad_fast_variant ? BMC_PAD_SLEW_FAST : BMC_PAD_SLEW_SLOW;
+    tx->pad_drive = pad_fast_variant ? BMC_PAD_DRIVE_8MA : BMC_PAD_DRIVE_4MA;
 
     // 既にピンが割当済みの場合は常駐SMを再初期化
     if (tx->current_tx_pin != 0xFFFFFFFF) {
@@ -168,6 +249,24 @@ void bmc_tx_controller_set_pad_variant(bmc_tx_controller_t *tx, bool pad_fast_va
         tx->current_tx_pin = 0xFFFFFFFF; // 強制再構成
         bmc_tx_ensure_sm_resident(tx, pin);
     }
+}
+
+bool bmc_tx_controller_set_tx_variant(bmc_tx_controller_t *tx, bool use_isr) {
+    if (!tx) return false;
+    if (use_isr && tx->offset_tx_isr == BMC_TX_OFFSET_INVALID) {
+        // ISR版プログラムが未登録の場合は安全にフォールバック (自ピン読み戻し版を維持)
+        tx->tx_use_isr_variant = false;
+        return false;
+    }
+    tx->tx_use_isr_variant = use_isr;
+
+    // 既にピンが割当済みの場合は常駐SMを再初期化
+    if (tx->current_tx_pin != 0xFFFFFFFF) {
+        uint pin = tx->current_tx_pin;
+        tx->current_tx_pin = 0xFFFFFFFF; // 強制再構成
+        bmc_tx_ensure_sm_resident(tx, pin);
+    }
+    return true;
 }
 
 void bmc_tx_controller_prime(bmc_tx_controller_t *tx, uint tx_pin) {
@@ -228,8 +327,13 @@ bool bmc_tx_wait_packet_done(bmc_tx_controller_t *tx) {
         tx->stats.tx_failures++;
 
         pio_sm_exec(tx->pio, tx->sm_tx, pio_encode_set(pio_pins, 1));
+        bool use_isr = (tx->tx_use_isr_variant && tx->offset_tx_isr != BMC_TX_OFFSET_INVALID);
+        if (use_isr) {
+            pio_sm_exec(tx->pio, tx->sm_tx, pio_encode_mov_not(pio_isr, pio_null));
+        }
         pio_sm_clear_fifos(tx->pio, tx->sm_tx);
-        pio_sm_exec(tx->pio, tx->sm_tx, pio_encode_jmp(tx->offset_tx));
+        uint active_offset = use_isr ? tx->offset_tx_isr : tx->offset_tx;
+        pio_sm_exec(tx->pio, tx->sm_tx, pio_encode_jmp(active_offset));
         return false;
     }
 }
@@ -316,6 +420,7 @@ bool bmc_rx_port_init_ex(bmc_rx_port_t *rx, PIO pio, uint sm, uint offset_rx,
         case BMC_RATE_FAST_8CYC:
             bmc_fast_rx_program_init(pio, sm, offset_rx, pin, rx->clkdiv);
             break;
+        case BMC_RATE_OC_16CYC:
         case BMC_RATE_STD_16CYC:
         default:
             bmc_rx_program_init(pio, sm, offset_rx, pin, rx->clkdiv);
@@ -339,7 +444,12 @@ bool bmc_rx_port_init_ex(bmc_rx_port_t *rx, PIO pio, uint sm, uint offset_rx,
 
     // 7. 必ず RX DMA を先行起動し、その後に RX SM を有効化する
     // RP2350: TRIGGER_SELF モード + 28bit RELOAD COUNT (0x0FFFFFFF ≈ 268M transfers ≈ 1.07GB)
+    // RP2040: self-trigger 非対応のため素の32bitカウント (モードビット無し)。
+#if PICO_RP2350
     uint32_t encoded_tc = dma_encode_transfer_count_with_self_trigger(BMC_RX_DMA_RELOAD_WORDS);
+#else
+    uint32_t encoded_tc = dma_encode_transfer_count(BMC_RX_DMA_RELOAD_WORDS);
+#endif
     dma_channel_configure(rx->dma_rx_chan, &dc, rx->rx_ring_buf, &pio->rxf[sm], encoded_tc, true);
     pio_sm_set_enabled(pio, sm, true);
 
@@ -361,7 +471,12 @@ bool BMC_SRAM_FUNC(bmc_rx_poll_packet)(bmc_rx_port_t *rx,
     //    オーバーラン復旧時の safe_tail_byte もこのヘッド位置を基準にするため、同一の読み出し
     //    から一貫して導出する)。
     uint32_t raw_tc = dma_hw->ch[rx->dma_rx_chan].transfer_count;
+    // RP2350: 上位4bitはMODEフィールドなのでマスクして除く。RP2040: レジスタ全体が素の32bitカウント。
+#if PICO_RP2350
     uint32_t curr_tc = raw_tc & DMA_CH0_TRANS_COUNT_COUNT_BITS;
+#else
+    uint32_t curr_tc = raw_tc;
+#endif
     uint32_t prev_tc = rx->last_transfer_count;
 
     // B-X: 直前の抽出試行が「現在届いているデータでは判定不能/シンク未検出」で終わっており

@@ -150,12 +150,16 @@ add_executable(poc_benchmark
     ${CMAKE_CURRENT_LIST_DIR}/main_benchmark.c
     ${CMAKE_CURRENT_LIST_DIR}/bmc/bmc_driver.c
     ${CMAKE_CURRENT_LIST_DIR}/uart/uart_driver.c
+    ${CMAKE_CURRENT_LIST_DIR}/uart/pio_uart_driver.c
+    ${CMAKE_CURRENT_LIST_DIR}/common/overclock.c
 )
 
 pico_generate_pio_header(poc_benchmark ${CMAKE_CURRENT_LIST_DIR}/bmc/bmc_p2p.pio)
 pico_generate_pio_header(poc_benchmark ${CMAKE_CURRENT_LIST_DIR}/bmc/bmc_p2p_fast.pio)
 pico_generate_pio_header(poc_benchmark ${CMAKE_CURRENT_LIST_DIR}/bmc/bmc_p2p_mid12.pio)
 pico_generate_pio_header(poc_benchmark ${CMAKE_CURRENT_LIST_DIR}/bmc/bmc_p2p_mid10.pio)
+pico_generate_pio_header(poc_benchmark ${CMAKE_CURRENT_LIST_DIR}/pio/uart_tx.pio)
+pico_generate_pio_header(poc_benchmark ${CMAKE_CURRENT_LIST_DIR}/pio/uart_rx.pio)
 
 target_include_directories(poc_benchmark PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
@@ -173,6 +177,10 @@ target_link_libraries(poc_benchmark PRIVATE
     hardware_clocks
     hardware_gpio
     poc_common
+)
+
+target_compile_definitions(poc_benchmark PRIVATE
+    POC_BOARD_NAME="${PICO_BOARD}"
 )
 
 pico_enable_stdio_usb(poc_benchmark 1)
