@@ -191,7 +191,7 @@ int BMC_SRAM_FUNC(bmc_find_sync_in_bits)(const uint8_t *buf, size_t buf_len_byte
     static const struct {
         uint32_t pat;
         uint32_t mask;
-    } BMC_SRAM_RODATA("bmc_sync") s_sync_patterns[8] = {
+    } s_sync_patterns[8] BMC_SRAM_RODATA("bmc_sync") = {
         { 0x93C70000u, 0xFFFF0000u },
         { 0x49E38000u, 0x7FFF8000u },
         { 0x24F1C000u, 0x3FFFC000u },
