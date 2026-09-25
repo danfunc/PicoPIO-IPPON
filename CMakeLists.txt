@@ -179,13 +179,22 @@ target_link_libraries(poc_benchmark PRIVATE
     poc_common
 )
 
+set(POC_RP2040_CLOCK_MHZ 150 CACHE STRING "RP2040 system clock frequency in MHz (default: 150)")
+
 target_compile_definitions(poc_benchmark PRIVATE
     POC_BOARD_NAME="${PICO_BOARD}"
+    POC_RP2040_CLOCK_MHZ=${POC_RP2040_CLOCK_MHZ}
     PICO_MEM_IN_RAM=1
     PICO_INT64_OPS_IN_RAM=1
     PICO_BITS_IN_RAM=1
     PICO_DIVIDER_IN_RAM=1
 )
+
+if(POC_RP2040_CLOCK_MHZ GREATER 200)
+    target_compile_definitions(poc_benchmark PRIVATE
+        PICO_FLASH_SPI_CLKDIV=4
+    )
+endif()
 
 pico_enable_stdio_usb(poc_benchmark 1)
 pico_enable_stdio_uart(poc_benchmark 0)

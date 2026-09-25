@@ -3,11 +3,11 @@
 #include "hardware/clocks.h"
 #include "pico/platform.h"
 #include "pico/stdlib.h"
+#include "hardware/vreg.h"
 #if PICO_RP2350
 #include "hardware/regs/qmi.h"
 #include "hardware/structs/qmi.h"
 #include "hardware/sync.h"
-#include "hardware/vreg.h"
 #endif
 
 #define POC_SYS_CLOCK_KHZ 300000u
@@ -55,16 +55,43 @@ bool poc_configure_300mhz(void) {
 #endif
 }
 
-#define POC_RP2040_SYS_CLOCK_KHZ 150000u
-
-bool poc_configure_rp2040_150mhz(void) {
+bool poc_configure_rp2040_clock(uint32_t freq_mhz) {
 #if PICO_RP2350
+    (void)freq_mhz;
     return false;
 #else
-    if (!set_sys_clock_khz(POC_RP2040_SYS_CLOCK_KHZ, true) ||
-        clock_get_hz(clk_sys) != POC_RP2040_SYS_CLOCK_KHZ * 1000u) {
+    enum vreg_voltage vreg = VREG_VOLTAGE_1_10;
+    if (freq_mhz > 250) {
+        vreg = VREG_VOLTAGE_1_30;
+    } else if (freq_mhz > 225) {
+        vreg = VREG_VOLTAGE_1_25;
+    } else if (freq_mhz > 150) {
+        vreg = VREG_VOLTAGE_1_20;
+    } else if (freq_mhz > 133) {
+        vreg = VREG_VOLTAGE_1_15;
+    }
+
+    if (vreg != VREG_VOLTAGE_1_10) {
+        vreg_set_voltage(vreg);
+        busy_wait_us(2000);
+    }
+
+    if (!set_sys_clock_khz(freq_mhz * 1000u, false)) {
         return false;
     }
-    return true;
+
+    const uint32_t sys_hz = clock_get_hz(clk_sys);
+    if (sys_hz != freq_mhz * 1000u) {
+        return false;
+    }
+
+    // Keep peripheral clock in sync with sys_clk
+    clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS,
+                    sys_hz, sys_hz);
+    return clock_get_hz(clk_peri) == sys_hz;
 #endif
+}
+
+bool poc_configure_rp2040_150mhz(void) {
+    return poc_configure_rp2040_clock(150);
 }
