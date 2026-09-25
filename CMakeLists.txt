@@ -194,6 +194,14 @@ if(POC_RP2040_CLOCK_MHZ GREATER 200)
     target_compile_definitions(poc_benchmark PRIVATE
         PICO_FLASH_SPI_CLKDIV=4
     )
+    if(TARGET bs2_default)
+        target_compile_definitions(bs2_default PRIVATE PICO_FLASH_SPI_CLKDIV=4)
+    endif()
+    if(COMMAND pico_clone_default_boot_stage2)
+        pico_clone_default_boot_stage2(poc_boot2_div4)
+        target_compile_definitions(poc_boot2_div4 PRIVATE PICO_FLASH_SPI_CLKDIV=4)
+        pico_set_boot_stage2(poc_benchmark poc_boot2_div4)
+    endif()
 endif()
 
 pico_enable_stdio_usb(poc_benchmark 1)

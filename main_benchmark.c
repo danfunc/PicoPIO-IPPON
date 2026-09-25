@@ -1345,14 +1345,18 @@ int main(void) {
 #if PICO_RP2350
     if (!poc_configure_300mhz()) {
         stdio_init_all();
-        printf("[FATAL] Could not configure RP2350 for 300MHz operation\n");
-        return 1;
+        while (1) {
+            printf("[FATAL] Could not configure RP2350 for 300MHz operation\n");
+            sleep_ms(1000);
+        }
     }
 #else
     if (!poc_configure_rp2040_clock(POC_RP2040_CLOCK_MHZ)) {
         stdio_init_all();
-        printf("[FATAL] Could not configure RP2040 for %uMHz operation\n", (unsigned)POC_RP2040_CLOCK_MHZ);
-        return 1;
+        while (1) {
+            printf("[FATAL] Could not configure RP2040 for %uMHz operation\n", (unsigned)POC_RP2040_CLOCK_MHZ);
+            sleep_ms(1000);
+        }
     }
 #endif
     stdio_init_all();
