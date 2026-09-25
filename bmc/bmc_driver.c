@@ -82,7 +82,8 @@ static void bmc_tx_ensure_sm_resident(bmc_tx_controller_t *tx, uint tx_pin) {
 
     // 18.75 Mbps profiles use the independently selected TX pad settings.
     if (tx->rate_family == BMC_RATE_FAST_8CYC ||
-        tx->rate_family == BMC_RATE_OC_16CYC) {
+        tx->rate_family == BMC_RATE_OC_16CYC ||
+        tx->rate_family == BMC_RATE_MID_12CYC) { /* x225 実験: Mid12 でも pad 設定を適用 */
         gpio_set_slew_rate(tx_pin, (tx->pad_slew == BMC_PAD_SLEW_FAST) ? GPIO_SLEW_RATE_FAST : GPIO_SLEW_RATE_SLOW);
         enum gpio_drive_strength ds;
         switch (tx->pad_drive) {
