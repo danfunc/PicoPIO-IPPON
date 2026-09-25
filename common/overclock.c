@@ -81,7 +81,8 @@ bool poc_configure_rp2040_clock(uint32_t freq_mhz) {
     }
 
     const uint32_t sys_hz = clock_get_hz(clk_sys);
-    if (sys_hz != freq_mhz * 1000u) {
+    const uint32_t target_hz = freq_mhz * 1000000u;
+    if (sys_hz != target_hz) {
         return false;
     }
 
