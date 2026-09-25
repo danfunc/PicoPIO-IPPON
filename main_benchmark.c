@@ -175,6 +175,9 @@ static bool s_benchmark_running = true;
 // B-3: 18.75M(8 cyc/bit)は実機実測でFAST+8mA駆動でのみ全レート安定動作したため既定をFASTにする。
 // このフラグはBMC_RATE_FAST_8CYCのときのみ有効 (bmc_tx_ensure_sm_residentでゲート済み)。
 // 16/12/10 cyc/bitの既定はSLOW+4mAのまま変更しない (実績のある設定を壊さない方針)。
+// クロックずれ試験: このボードの PIO 分周を (1 + skew) 倍する (+ で線速が遅くなる)。
+// BMC と PIO UART にだけ効く (PL011 UART は対象外)。キー '+'/'-' で 0.5% 刻み、'0' で解除
+static float s_clk_skew_pct = 0.0f;
 static bmc_pad_slew_t s_pad_slew = BMC_PAD_SLEW_FAST;   // B-3既定を維持 (FAST_8CYCのみ適用)
 static bmc_pad_drive_t s_pad_drive = BMC_PAD_DRIVE_8MA;  // B-3既定を維持 (FAST_8CYCのみ適用)
 static bool s_tx_use_isr = false; // NIPPON: TX方式 (false=自ピン読み戻し版/既定, true=ISR極性保持版, FAST_8CYCのみ実装)
@@ -573,7 +576,16 @@ static bool apply_mode(bench_mode_t mode) {
         printf("  TX Variant: %s\n", s_tx_use_isr ? "ISR極性保持版" : "自ピン読み戻し版 (Default)");
     }
 
-    bool ok = desc->is_uart ? setup_uart(desc->uart_baud) : setup_bmc(desc->bmc_clkdiv, desc->rate_family);
+    const float skew = 1.0f + s_clk_skew_pct / 100.0f;
+    uint32_t uart_baud = desc->uart_baud;
+    if (desc->is_uart && (uart_baud & PIO_UART_BAUD_FLAG) && s_clk_skew_pct != 0.0f) {
+        uart_baud = PIO_UART_BAUD_FLAG | (uint32_t)((float)(uart_baud & ~PIO_UART_BAUD_FLAG) / skew + 0.5f);
+    }
+    if (s_clk_skew_pct != 0.0f) {
+        printf("  [SKEW] PIO clock skew %+.2f%% (BMC clkdiv x%.4f / PIO UART baud /%.4f)\n",
+               (double)s_clk_skew_pct, (double)skew, (double)skew);
+    }
+    bool ok = desc->is_uart ? setup_uart(uart_baud) : setup_bmc(desc->bmc_clkdiv * skew, desc->rate_family);
     if (!ok) {
         printf("[ERROR] Failed to configure hardware for mode %s!\n", desc->name);
         return false;
@@ -1179,6 +1191,11 @@ static void benchmark_process_input(void) {
     } else if (ch == 'n' || ch == 'N') {
         s_auto_sweep = false;
         apply_mode(MODE_PIO_UART_37M_BURST);
+    } else if (ch == '+' || ch == '=' || ch == '-' || ch == '0') {
+        if (ch == '0') s_clk_skew_pct = 0.0f;
+        else s_clk_skew_pct += (ch == '-') ? -0.5f : 0.5f;
+        printf("\n>>> PIO clock skew: %+.2f%% <<<\n", (double)s_clk_skew_pct);
+        apply_mode(s_current_mode);
     } else if (ch == 'z' || ch == 'Z') {
         s_auto_sweep = false;
         apply_mode(MODE_BMC_25M_BURST);
