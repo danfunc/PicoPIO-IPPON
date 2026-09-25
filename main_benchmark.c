@@ -52,6 +52,11 @@ typedef enum {
     MODE_PIO_UART_37M_BURST,
     MODE_PIO_UART_12M_BURST,
     MODE_PIO_UART_15M_BURST,
+    MODE_BMC_25M_BURST,       // BMC 25.000 Mbps (12 cyc/bit, clkdiv 1.0 @ 300MHz, 限界試験)
+    MODE_BMC_30M_BURST,       // BMC 30.000 Mbps (10 cyc/bit, clkdiv 1.0 @ 300MHz, 限界試験)
+    MODE_BMC_37M_BURST,       // BMC 37.500 Mbps ( 8 cyc/bit, clkdiv 1.0 @ 300MHz, 限界試験)
+    MODE_PIO_UART_25M_BURST,
+    MODE_PIO_UART_30M_BURST,
     MODE_COUNT
 } bench_mode_t;
 
@@ -83,6 +88,15 @@ typedef struct {
 #define BMC_RATE_FAMILY_18M BMC_RATE_OC_16CYC
 #define BMC_18M_LABEL "18.750M, OC16"
 #define BMC_18M_BURST_LABEL "18.750M Burst, OC16"
+#elif defined(POC_RP2040_CLOCK_MHZ) && (POC_RP2040_CLOCK_MHZ == 300)
+#define BMC_CLKDIV_3M  6.0f
+#define BMC_CLKDIV_9M  2.0f
+#define BMC_CLKDIV_12M 2.0f
+#define BMC_CLKDIV_15M 2.0f
+#define BMC_CLKDIV_18M 1.0f
+#define BMC_RATE_FAMILY_18M BMC_RATE_OC_16CYC
+#define BMC_18M_LABEL "18.750M, OC16@300MHz"
+#define BMC_18M_BURST_LABEL "18.750M Burst, OC16@300MHz"
 #elif defined(POC_RP2040_CLOCK_MHZ) && (POC_RP2040_CLOCK_MHZ == 225)
 #define BMC_CLKDIV_3M  4.5f
 #define BMC_CLKDIV_9M  1.5f
@@ -131,11 +145,17 @@ static const mode_desc_t MODE_DESCS[MODE_COUNT] = {
     [MODE_PIO_UART_18M_BURST] = {"PIO UART (18.750M Burst, 8N1)", 18.750f, true, BMC_RATE_STD_16CYC, 0.0f, PIO_UART_BAUD_FLAG | 18750000u, false, true},
     [MODE_PIO_UART_37M_BURST] = {"PIO UART (37.500M Burst, 8N1)", 37.500f, true, BMC_RATE_STD_16CYC, 0.0f, PIO_UART_BAUD_FLAG | 37500000u, true, true},
     [MODE_PIO_UART_12M_BURST] = {"PIO UART (12.500M Burst, 8N1)", 12.500f, true, BMC_RATE_STD_16CYC, 0.0f, PIO_UART_BAUD_FLAG | 12500000u, false, true},
-    [MODE_PIO_UART_15M_BURST] = {"PIO UART (15.000M Burst, 8N1)", 15.000f, true, BMC_RATE_STD_16CYC, 0.0f, PIO_UART_BAUD_FLAG | 15000000u, false, true}
+    [MODE_PIO_UART_15M_BURST] = {"PIO UART (15.000M Burst, 8N1)", 15.000f, true, BMC_RATE_STD_16CYC, 0.0f, PIO_UART_BAUD_FLAG | 15000000u, false, true},
+    // 限界試験: 両ボード 300MHz 前提 (clkdiv 1.0 固定)。他のクロックでは線速が変わる (起動時レート表を見ること)
+    [MODE_BMC_25M_BURST]  = {"BMC  (25.000M Burst, Mid12@300)", 25.000f, false, BMC_RATE_MID_12CYC, 1.0f, 0, true, true},
+    [MODE_BMC_30M_BURST]  = {"BMC  (30.000M Burst, Mid10@300)", 30.000f, false, BMC_RATE_MID_10CYC, 1.0f, 0, true, true},
+    [MODE_BMC_37M_BURST]  = {"BMC  (37.500M Burst, Fast8@300)", 37.500f, false, BMC_RATE_FAST_8CYC, 1.0f, 0, true, true},
+    [MODE_PIO_UART_25M_BURST] = {"PIO UART (25.000M Burst, 8N1)", 25.000f, true, BMC_RATE_STD_16CYC, 0.0f, PIO_UART_BAUD_FLAG | 25000000u, true, true},
+    [MODE_PIO_UART_30M_BURST] = {"PIO UART (30.000M Burst, 8N1)", 30.000f, true, BMC_RATE_STD_16CYC, 0.0f, PIO_UART_BAUD_FLAG | 30000000u, true, true}
 };
 
 static inline bool bmc_is_18m_rate(bmc_rate_family_t family) {
-    return family == BMC_RATE_FAST_8CYC || family == BMC_RATE_OC_16CYC;
+    return family != BMC_RATE_STD_16CYC; // 12/10/8cyc と OC16 は TX パッド設定 (slew/drive) の対象
 }
 
 // -------------------------------------------------------------
@@ -413,14 +433,14 @@ static bool setup_bmc(float clkdiv, bmc_rate_family_t rate_family) {
         case BMC_RATE_MID_12CYC:
             off_tx = pio_add_program(s_bmc_pio_tx, &bmc_mid12_tx_program);
             off_rx = pio_add_program(s_bmc_pio_rx, &bmc_mid12_rx_program);
-            transport_name = "BMC 12.5M (Mid12)";
-            target_phy = 12.500f;
+            transport_name = "BMC Mid12";
+            target_phy = (float)clock_get_hz(clk_sys) / clkdiv / 12.0f / 1000000.0f;
             break;
         case BMC_RATE_MID_10CYC:
             off_tx = pio_add_program(s_bmc_pio_tx, &bmc_mid10_tx_program);
             off_rx = pio_add_program(s_bmc_pio_rx, &bmc_mid10_rx_program);
-            transport_name = "BMC 15.0M (Mid10)";
-            target_phy = 15.000f;
+            transport_name = "BMC Mid10";
+            target_phy = (float)clock_get_hz(clk_sys) / clkdiv / 10.0f / 1000000.0f;
             break;
         case BMC_RATE_FAST_8CYC:
         case BMC_RATE_OC_16CYC: {
@@ -438,7 +458,7 @@ static bool setup_bmc(float clkdiv, bmc_rate_family_t rate_family) {
             }
             transport_name = oc16 ? "BMC 18.75M (300MHz/16cyc)" : "BMC 18.75M (Fast8)";
             is_exp = true;
-            target_phy = 18.750f;
+            target_phy = (float)clock_get_hz(clk_sys) / clkdiv / (oc16 ? 16.0f : 8.0f) / 1000000.0f;
             bmc_tx_controller_set_pad_slew(&s_bmc_tx, s_pad_slew);
             bmc_tx_controller_set_pad_drive(&s_bmc_tx, s_pad_drive);
             bmc_tx_controller_set_mode_ex(&s_bmc_tx, off_tx, off_tx_isr, clkdiv, rate_family);
@@ -468,6 +488,8 @@ static bool setup_bmc(float clkdiv, bmc_rate_family_t rate_family) {
             break;
     }
 
+    bmc_tx_controller_set_pad_slew(&s_bmc_tx, s_pad_slew);
+    bmc_tx_controller_set_pad_drive(&s_bmc_tx, s_pad_drive);
     bmc_tx_controller_set_mode(&s_bmc_tx, off_tx, clkdiv, rate_family);
     bmc_tx_controller_prime(&s_bmc_tx, PIN_TX);
     if (!bmc_rx_port_init_ex(&s_bmc_rx, s_bmc_pio_rx, 0, off_rx, PIN_RX, clkdiv, rate_family)) {
@@ -1157,6 +1179,21 @@ static void benchmark_process_input(void) {
     } else if (ch == 'n' || ch == 'N') {
         s_auto_sweep = false;
         apply_mode(MODE_PIO_UART_37M_BURST);
+    } else if (ch == 'z' || ch == 'Z') {
+        s_auto_sweep = false;
+        apply_mode(MODE_BMC_25M_BURST);
+    } else if (ch == 'x' || ch == 'X') {
+        s_auto_sweep = false;
+        apply_mode(MODE_BMC_30M_BURST);
+    } else if (ch == 'b' || ch == 'B') {
+        s_auto_sweep = false;
+        apply_mode(MODE_BMC_37M_BURST);
+    } else if (ch == 'g' || ch == 'G') {
+        s_auto_sweep = false;
+        apply_mode(MODE_PIO_UART_25M_BURST);
+    } else if (ch == 'h' || ch == 'H') {
+        s_auto_sweep = false;
+        apply_mode(MODE_PIO_UART_30M_BURST);
     } else if (ch == 'u' || ch == 'U') {
         s_auto_sweep = false;
         apply_mode(MODE_PIO_UART_12M_BURST);
@@ -1269,6 +1306,8 @@ static void benchmark_print_banner(void) {
     printf("    [m] PIO UART 18.750 Mbps Burst (official 8N1 PIO + DMA)\n");
     printf("    [n] PIO UART 37.500 Mbps Burst (official 8N1 PIO + DMA, EXPERIMENTAL)\n");
     printf("    [u] PIO UART 12.500 Mbps Burst (official 8N1 PIO + DMA)\n");
+    printf("    [z/x/b] BMC 25/30/37.5 Mbps Burst (12/10/8 cyc, clkdiv 1.0, 300MHz 前提の限界試験)\n");
+    printf("    [g/h] PIO UART 25/30 Mbps Burst (限界試験)\n");
     printf("    [v] PIO UART 15.000 Mbps Burst (official 8N1 PIO + DMA)\n");
     printf("    [a] または [s]: 全モード自動スイープ比較 (各4秒計測 & サマリー表出力)\n");
     printf("    [ ] (スペース): 一時停止 / 再開\n");
