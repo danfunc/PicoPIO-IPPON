@@ -181,6 +181,10 @@ target_link_libraries(poc_benchmark PRIVATE
 
 target_compile_definitions(poc_benchmark PRIVATE
     POC_BOARD_NAME="${PICO_BOARD}"
+    PICO_MEM_IN_RAM=1
+    PICO_INT64_OPS_IN_RAM=1
+    PICO_BITS_IN_RAM=1
+    PICO_DIVIDER_IN_RAM=1
 )
 
 pico_enable_stdio_usb(poc_benchmark 1)
